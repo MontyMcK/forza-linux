@@ -1,0 +1,57 @@
+# ============================================================
+#  GAME DATA IS SECRET. NOTHING FROM THE DUMP EVER GOES IN GIT.
+#  See CLAUDE.md "Rule 0".
+# ============================================================
+
+# The dump archive and anything extracted from it
+*.rar
+*.7z
+*.xvd
+*.xvc
+*.msixvc
+game_data/
+dump/
+Mount/
+EmbeddedXvd/
+
+# Azimuth (proprietary Windows launcher, studied as a reference only, CLAUDE.md Rule 1)
+azimuth*.zip
+azimuth*/
+
+# Anything derived from the game binary (disassembly, decompiles,
+# Ghidra/IDA projects, raw dumps, extracted shaders, logs with data)
+research/private/
+*.gpr
+*.rep/
+*.i64
+*.idb
+*.til
+*.bndb
+*.exe
+*.dll
+*.sys
+*.pso
+*.vso
+*.cso
+*.dxbc
+*.shaderbin
+*.bank
+*.bk2
+*.xma
+
+# Runtime output (saves, logs, screenshots may show game content)
+runtime/
+screenshots/
+*.log
+*.dmp
+
+# Build output
+build/
+build-*/
+out/
+.cache/
+compile_commands.json
+
+# Python bytecode
+__pycache__/
+*.pyc

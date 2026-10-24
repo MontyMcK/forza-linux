@@ -1,0 +1,237 @@
+// Buffers, textures and views.
+//
+// Xbox resource descriptors are the desktop ones plus two trailing u32 fields
+// (umd copies both into the same internal slots for every resource type;
+// probably ESRAM offset/size, FINDINGS §3.1). Xbox-only flag bits are stripped
+// before DXVK sees them, and logged once.
+#include <cstdio>
+#include <cstring>
+
+#include "common/log.h"
+#include "hle/d3d11x/d3d11x.h"
+#include "hle/d3d11x/dxvk.h"
+
+namespace fl::d3d {
+namespace {
+
+using winrt::Iface;
+using winrt::Vtable;
+namespace dd = desktop::dev;
+
+constexpr UINT kDesktopBindMask = 0x3ff;     // VERTEX_BUFFER .. VIDEO_ENCODER
+constexpr UINT kDesktopCpuMask = 0x30000;    // CPU_ACCESS_WRITE | READ
+constexpr UINT kDesktopMiscMask = 0x1 | 0x4 | 0x10 | 0x20 | 0x40 | 0x80;  // GENERATE_MIPS, TEXTURECUBE,
+                                                                           // DRAWINDIRECT, RAW, STRUCTURED, CLAMP
+
+void sanitize(const char* what, UINT* bind, UINT* cpu, UINT* misc) {
+    if (*bind & ~kDesktopBindMask) log_once((std::string(what) + ": Xbox-only BindFlags").c_str(), *bind);
+    if (*cpu & ~kDesktopCpuMask) log_once((std::string(what) + ": Xbox-only CPUAccessFlags").c_str(), *cpu);
+    if (*misc & ~kDesktopMiscMask) log_once((std::string(what) + ": Xbox-only MiscFlags").c_str(), *misc);
+    *bind &= kDesktopBindMask;
+    *cpu &= kDesktopCpuMask;
+    *misc &= kDesktopMiscMask;
+}
+
+// ---- Resource vtables (Xbox, 13 slots: umd 0x16f750) ----
+// 8 GetType, 9 SetEvictionPriority, 10 GetEvictionPriority, 11 Xbox extra, 12 GetDesc.
+
+WINAPI void res_GetType(Iface* self, int* dim) { *dim = self->as<Resource>()->dim; }
+WINAPI void res_SetEvictionPriority(Iface* self, UINT) {}
+WINAPI UINT res_GetEvictionPriority(Iface* self) { return 0; }
+// umd: `*out = this`. What it means is unknown; do the same.
+WINAPI void res_Slot11(Iface* self, void** out) {
+    FL_STUB_ONCE("ID3D11Resource (Xbox) slot 11 returns the object itself, like umd");
+    *out = self;
+}
+WINAPI void res_GetDesc(Iface* self, void* desc) {
+    auto* r = self->as<Resource>();
+    std::memcpy(desc, r->xdesc, r->xdesc_size);
+}
+
+Vtable make_resource_vt(const char* name) {
+    Vtable v(name, 24, false);  // 13 known + spare traps
+    child_base(v)
+        .set(8, &res_GetType)
+        .set(9, &res_SetEvictionPriority)
+        .set(10, &res_GetEvictionPriority)
+        .set(11, &res_Slot11)
+        .set(12, &res_GetDesc);
+    return v;
+}
+Vtable& buffer_vt() { static Vtable v = make_resource_vt("ID3D11BufferX"); return v; }
+Vtable& tex1d_vt() { static Vtable v = make_resource_vt("ID3D11Texture1DX"); return v; }
+Vtable& tex2d_vt() { static Vtable v = make_resource_vt("ID3D11Texture2DX"); return v; }
+Vtable& tex3d_vt() { static Vtable v = make_resource_vt("ID3D11Texture3DX"); return v; }
+
+// ---- Device: resource creation ----
+
+DeviceX* dev_of(Iface* self) { return self->as<DeviceX>(); }
+
+// Xbox resource descriptor -> desktop (FINDINGS §3.1): desktop fields + 2 u32.
+// dim: 1 buffer (0x18 -> 0x20 bytes), 2 tex1d (0x20 -> 0x28), 3 tex2d (0x2c -> 0x34), 4 tex3d (0x24 -> 0x2c).
+struct DimInfo {
+    int desktop_words, usage, bind, cpu, misc, create_slot;
+    size_t xbox_size;
+    Vtable& (*vt)();
+    const char16_t* name;
+    const GUID* iid;
+    const char* what;
+};
+const DimInfo& dim_info(int dim) {
+    static const DimInfo info[5] = {
+        {},
+        {6, 1, 2, 3, 4, dd::CreateBuffer, 0x20, buffer_vt, u"D3D11Buffer", &IID_ID3D11Buffer, "CreateBuffer"},
+        {8, 4, 5, 6, 7, dd::CreateTexture1D, 0x28, tex1d_vt, u"D3D11Texture1D", &IID_ID3D11Texture1D, "CreateTexture1D"},
+        {11, 7, 8, 9, 10, dd::CreateTexture2D, 0x34, tex2d_vt, u"D3D11Texture2D", &IID_ID3D11Texture2D, "CreateTexture2D"},
+        {9, 5, 6, 7, 8, dd::CreateTexture3D, 0x2c, tex3d_vt, u"D3D11Texture3D", &IID_ID3D11Texture3D, "CreateTexture3D"},
+    };
+    return info[dim];
+}
+
+}  // namespace
+
+winrt::Vtable& texture2d_vtable() { return tex2d_vt(); }
+
+HRESULT create_resource(DeviceX* dev, int dim, const uint32_t* xd, const void* init, void** out, bool placement,
+                        Resource** created) {
+    const DimInfo& di = dim_info(dim);
+    uint32_t d[16];
+    std::memcpy(d, xd, di.desktop_words * 4);
+    sanitize(di.what, &d[di.bind], &d[di.cpu], &d[di.misc]);
+    uint32_t e0 = xd[di.desktop_words], e1 = xd[di.desktop_words + 1];
+    if ((e0 || e1) && !placement)
+        log_once((std::string(di.what) + ": Xbox extra fields set, ignored").c_str(), (uint64_t(e1) << 32) | e0);
+    if (placement) {
+        // Our copy of a placement resource is filled with UpdateSubresource, so it
+        // must be DEFAULT usage without CPU access (game Maps return game memory).
+        d[di.usage] = 0;
+        d[di.cpu] = 0;
+    }
+    void* obj = nullptr;
+    HRESULT hr = dx<HRESULT>(dev->dxvk, di.create_slot, d, init, out ? &obj : nullptr);
+    if (hr < 0) {
+        char buf[256];
+        int n = std::snprintf(buf, sizeof buf, "d3d: %s%s(", placement ? "placement " : "", di.what);
+        for (int i = 0; i < di.desktop_words + 2 && n < (int)sizeof buf - 16; i++)
+            n += std::snprintf(buf + n, sizeof buf - n, "%s%u", i ? " " : "", xd[i]);
+        FL_ERROR("%s) failed: 0x%08x", buf, static_cast<uint32_t>(hr));
+    }
+    if (hr < 0 || !out) {
+        if (out) *out = nullptr;
+        return hr;
+    }
+    auto* r = new Resource(di.name, dev, di.vt(), obj, dim, xd, di.xbox_size);
+    r->expose(*di.iid, &r->iface);
+    *out = &r->iface;
+    if (created) *created = r;
+    return hr;
+}
+
+namespace {
+
+WINAPI HRESULT dev_CreateBuffer(Iface* self, const uint32_t* xd, const void* init, void** out) {
+    return create_resource(dev_of(self), 1, xd, init, out, false, nullptr);
+}
+WINAPI HRESULT dev_CreateTexture1D(Iface* self, const uint32_t* xd, const void* init, void** out) {
+    return create_resource(dev_of(self), 2, xd, init, out, false, nullptr);
+}
+WINAPI HRESULT dev_CreateTexture2D(Iface* self, const uint32_t* xd, const void* init, void** out) {
+    return create_resource(dev_of(self), 3, xd, init, out, false, nullptr);
+}
+WINAPI HRESULT dev_CreateTexture3D(Iface* self, const uint32_t* xd, const void* init, void** out) {
+    return create_resource(dev_of(self), 4, xd, init, out, false, nullptr);
+}
+
+// ---- Views (Xbox: 8 GetResource, 9 GetDesc; umd 0x117970 etc.) ----
+
+struct View : DeviceChild {
+    View(const char16_t* name, DeviceX* dev, Vtable& vt, void* obj, DeviceChild* resource, int desc_slot)
+        : DeviceChild(name, dev, vt, obj), res(resource), desktop_getdesc(desc_slot) {
+        res->add_ref();
+        expose(IID_ID3D11View, &iface);
+    }
+    ~View() override { res->release(); }
+    Resource* backing() override { return res->backing(); }
+    DeviceChild* res;
+    int desktop_getdesc;
+};
+
+WINAPI void view_GetResource(Iface* self, void** out) {
+    auto* v = self->as<View>();
+    v->res->add_ref();
+    *out = &v->res->iface;
+}
+// View descriptors are the desktop layouts (unverified for Xbox-only formats); DXVK fills them.
+WINAPI void view_GetDesc(Iface* self, void* desc) {
+    auto* v = self->as<View>();
+    dx<void>(v->dxvk, v->desktop_getdesc, desc);
+}
+
+Vtable make_view_vt(const char* name) {
+    Vtable v(name, 16, false);  // 10-12 known + spare traps
+    child_base(v).set(8, &view_GetResource).set(9, &view_GetDesc);
+    return v;
+}
+Vtable& srv_vt() { static Vtable v = make_view_vt("ID3D11ShaderResourceViewX"); return v; }
+Vtable& rtv_vt() { static Vtable v = make_view_vt("ID3D11RenderTargetViewX"); return v; }
+Vtable& dsv_vt() { static Vtable v = make_view_vt("ID3D11DepthStencilViewX"); return v; }
+Vtable& uav_vt() { static Vtable v = make_view_vt("ID3D11UnorderedAccessViewX"); return v; }
+
+// All view types share the desktop GetDesc slot (7: after ID3D11View::GetResource).
+constexpr int kDesktopViewGetDesc = 8;
+
+HRESULT create_view(Iface* self, int desktop_slot, const void* res, const void* desc, void** out, Vtable& vt,
+                    const char16_t* name, const GUID& iid, const char* what) {
+    DeviceChild* r = child_of(res);
+    if (!r) return E_INVALIDARG;
+    void* obj = nullptr;
+    HRESULT hr = dx<HRESULT>(dev_of(self)->dxvk, desktop_slot, r->dxvk, desc, out ? &obj : nullptr);
+    if (hr < 0) {
+        const uint32_t* dw = static_cast<const uint32_t*>(desc);
+        if (dw)
+            FL_ERROR("d3d: %s(fmt=%u dim=%u %u %u %u %u) failed: 0x%08x", what, dw[0], dw[1], dw[2], dw[3], dw[4],
+                     dw[5], static_cast<uint32_t>(hr));
+        else
+            FL_ERROR("d3d: %s(no desc) failed: 0x%08x", what, static_cast<uint32_t>(hr));
+    }
+    if (hr < 0 || !out) {
+        if (out) *out = nullptr;
+        return hr;
+    }
+    auto* v = new View(name, dev_of(self), vt, obj, r, kDesktopViewGetDesc);
+    v->expose(iid, &v->iface);
+    *out = &v->iface;
+    return hr;
+}
+
+WINAPI HRESULT dev_CreateShaderResourceView(Iface* self, const void* res, const void* desc, void** out) {
+    return create_view(self, dd::CreateShaderResourceView, res, desc, out, srv_vt(), u"D3D11ShaderResourceView",
+                       IID_ID3D11ShaderResourceView, "CreateShaderResourceView");
+}
+WINAPI HRESULT dev_CreateUnorderedAccessView(Iface* self, const void* res, const void* desc, void** out) {
+    return create_view(self, dd::CreateUnorderedAccessView, res, desc, out, uav_vt(), u"D3D11UnorderedAccessView",
+                       IID_ID3D11UnorderedAccessView, "CreateUnorderedAccessView");
+}
+WINAPI HRESULT dev_CreateRenderTargetView(Iface* self, const void* res, const void* desc, void** out) {
+    return create_view(self, dd::CreateRenderTargetView, res, desc, out, rtv_vt(), u"D3D11RenderTargetView",
+                       IID_ID3D11RenderTargetView, "CreateRenderTargetView");
+}
+WINAPI HRESULT dev_CreateDepthStencilView(Iface* self, const void* res, const void* desc, void** out) {
+    return create_view(self, dd::CreateDepthStencilView, res, desc, out, dsv_vt(), u"D3D11DepthStencilView",
+                       IID_ID3D11DepthStencilView, "CreateDepthStencilView");
+}
+
+}  // namespace
+
+void add_resource_methods(Vtable& v) {
+    v.set(dev_slot(dd::CreateBuffer), &dev_CreateBuffer)
+        .set(dev_slot(dd::CreateTexture1D), &dev_CreateTexture1D)
+        .set(dev_slot(dd::CreateTexture2D), &dev_CreateTexture2D)
+        .set(dev_slot(dd::CreateTexture3D), &dev_CreateTexture3D)
+        .set(dev_slot(dd::CreateShaderResourceView), &dev_CreateShaderResourceView)
+        .set(dev_slot(dd::CreateUnorderedAccessView), &dev_CreateUnorderedAccessView)
+        .set(dev_slot(dd::CreateRenderTargetView), &dev_CreateRenderTargetView)
+        .set(dev_slot(dd::CreateDepthStencilView), &dev_CreateDepthStencilView);
+}
+
+}  // namespace fl::d3d

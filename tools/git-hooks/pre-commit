@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Blocks commits that contain game data. Enabled via:
+#   git config core.hooksPath tools/git-hooks
+exec "$(git rev-parse --show-toplevel)/tools/check_no_game_data.sh" --staged
