@@ -6,6 +6,7 @@
 // comment says otherwise.
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <unordered_map>
 
 #include "common/log.h"
@@ -357,7 +358,8 @@ WINAPI void ctx_CopySubresourceRegion1(void* self, void* dst, UINT dst_sub, UINT
 WINAPI void ctx_CopyResource(void* self, void* dst, void* src) {
     void* s = bind_unwrap(ctxdx(self), src);
     if (trace::active())
-        trace::event("CopyResource dst[%s] <- src[%s]", trace::describe_dxvk(unwrap(dst)), trace::describe_dxvk(s));
+        trace::event("CopyResource dst[%s] <- src[%s]", std::string(trace::describe_dxvk(unwrap(dst))).c_str(),
+                     std::string(trace::describe_dxvk(s)).c_str());
     dx<void>(ctxdx(self), dc::CopyResource, unwrap(dst), s);
 }
 WINAPI void ctx_UpdateSubresource(void* self, void* dst, UINT sub, const void* box, const void* data, UINT row,
@@ -524,7 +526,7 @@ WINAPI HRESULT ctx_FinishCommandList(void* self, BOOL restore, void** out) {
     }
     void* list = nullptr;
     HRESULT hr = dx<HRESULT>(c->dxvk, dc::FinishCommandList, restore, out ? &list : nullptr);
-    trace::event("FinishCommandList on deferred %p -> list %p (hr 0x%x)", self, list, static_cast<uint32_t>(hr));
+    trace::event("FinishCommandList on deferred %p [ctx %p] -> list %p (hr 0x%x)", self, c->dxvk, list, static_cast<uint32_t>(hr));
     if (!restore) c->applied_topology_bits = 0;
     if (hr < 0 || !out) {
         if (hr < 0) FL_ERROR("d3d: FinishCommandList failed: 0x%08x", static_cast<uint32_t>(hr));
@@ -539,7 +541,20 @@ WINAPI HRESULT ctx_FinishCommandList(void* self, BOOL restore, void** out) {
 
 WINAPI void ctx_ExecuteCommandList(void* self, void* list, BOOL restore) {
     auto* c = C::from(self);
-    trace::event("ExecuteCommandList %p (dxvk %p) on %s %p", list, unwrap(list), c->deferred ? "deferred" : "immediate", self);
+    if (trace::active()) {
+        void* rtv = nullptr;
+        void* dsv = nullptr;
+        dx<void>(c->dxvk, dc::OMGetRenderTargets, 1u, &rtv, &dsv);
+        struct { float x, y, w, h, mn, mx; } vp{};
+        UINT nvp = 1;
+        dx<void>(c->dxvk, dc::RSGetViewports, &nvp, &vp);
+        UINT flags = dx<UINT>(unwrap(list), 7 /* ID3D11CommandList::GetContextFlags */);
+        trace::event("ExecuteCommandList %p (dxvk %p, flags 0x%x) on %s %p: rt0 %p ds %p viewport %.0fx%.0f", list,
+                     unwrap(list), flags, c->deferred ? "deferred" : "immediate", self, rtv, dsv, vp.w, vp.h);
+        if (rtv) dx_release(rtv);
+        if (dsv) dx_release(dsv);
+        trace::log_targets(c->dxvk, "      ");
+    }
     dx<void>(c->dxvk, dc::ExecuteCommandList, unwrap(list), restore);
     trace::after_draw(c->dxvk);
     if (!restore) c->applied_topology_bits = 0;  // DXVK cleared the state

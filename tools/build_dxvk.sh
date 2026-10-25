@@ -7,6 +7,17 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 git submodule update --init --recursive third_party/dxvk
+# Our patches on top of the pinned release (tools/dxvk-patches/*.patch), each
+# applied once: skipped when it already reverse-applies cleanly.
+for p in tools/dxvk-patches/*.patch; do
+  [ -e "$p" ] || continue
+  if git -C third_party/dxvk apply --reverse --check "$root/$p" 2>/dev/null; then
+    echo "dxvk patch already applied: $p"
+  else
+    git -C third_party/dxvk apply "$root/$p"
+    echo "dxvk patch applied: $p"
+  fi
+done
 if [ ! -f build-dxvk/build.ninja ]; then
   meson setup build-dxvk third_party/dxvk --buildtype=release \
     --prefix="$root/build-dxvk/install" \

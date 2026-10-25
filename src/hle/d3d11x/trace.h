@@ -21,5 +21,7 @@ void after_draw(void* dxctx);
 void event(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 // One-line description of a game resource/view interface or DXVK object.
 const char* describe_dxvk(void* dxvk_obj);
+// The render targets and depth target bound on `dxctx`, one line each.
+void log_targets(void* dxctx, const char* indent);
 
 }  // namespace fl::d3d::trace

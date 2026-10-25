@@ -1,5 +1,6 @@
 // D3D11XCreateDeviceX, the device's own methods, and the DXGI wrappers.
 // Resource/view creation is in resources.cpp, shaders/states in pipeline.cpp.
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -111,12 +112,17 @@ WINAPI void dev_GetImmediateContext(Iface* self, void** out) {
     d->add_ref();  // the context shares the device's refcount (as in umd)
     *out = d->immediate;
 }
-// Xbox flags seen: 0x60000, 0xa0000 (meaning unknown; DXVK requires 0).
+// Xbox flags seen: 0x60000, 0xa0000. Bit 17 (0x20000) makes a draw bundle
+// (Azimuth rva 0x128ff0 accepts only 0, 0x60000, 0xa0000): its command lists
+// run on the executing context's current state. Our DXVK patch
+// (tools/dxvk-patches/0001-xbox-draw-bundles.patch) implements that for
+// deferred contexts created with the same bit. Bits 18/19: meaning unknown.
+constexpr UINT kDeferredBundle = 0x20000;
 WINAPI HRESULT dev_CreateDeferredContext(Iface* self, UINT flags, void** out) {
-    if (flags) log_once("CreateDeferredContext: Xbox flags (ignored)", flags);
+    if (flags & ~(kDeferredBundle | 0xc0000)) log_once("CreateDeferredContext: unknown Xbox flags", flags);
     auto* d = dev_of(self);
     void* ctx = nullptr;
-    HRESULT hr = dx<HRESULT>(d->dxvk, dd::CreateDeferredContext, 0u, out ? &ctx : nullptr);
+    HRESULT hr = dx<HRESULT>(d->dxvk, dd::CreateDeferredContext, flags & kDeferredBundle, out ? &ctx : nullptr);
     if (hr < 0 || !out) {
         FL_ERROR("d3d: CreateDeferredContext failed: 0x%08x", static_cast<uint32_t>(hr));
         if (out) *out = nullptr;
@@ -222,6 +228,7 @@ WINAPI HRESULT D3D11XCreateDeviceX_(const CreateDeviceParams* p, void** out_devi
     d->dxvk = dev;
     d->creation_flags = p->flags;
     d->immediate = make_context(d, ctx, false);
+    FL_LOG(d3d, "immediate context: dxvk %p, game block %p", ctx, static_cast<void*>(d->immediate));
     if (out_context) {
         d->add_ref();
         *out_context = d->immediate;

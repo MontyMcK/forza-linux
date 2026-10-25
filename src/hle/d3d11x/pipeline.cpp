@@ -53,13 +53,25 @@ void shader_failed(const char* what, const void* code, SIZE_T len, HRESULT hr) {
              static_cast<uint32_t>(hr));
 }
 
+// FL_LOG=shaders: which wrapper (the pointer the frame trace prints) has which
+// bytecode (FNV-1a of the DXBC; match it against DXVK_SHADER_DUMP_PATH dumps).
+void log_shader(const char* stage, void* dxvk_obj, const void* code, SIZE_T len) {
+    if (!log_enabled("shaders")) return;
+    uint64_t h = 1469598103934665603ull;
+    for (SIZE_T i = 0; i < len; i++) h = (h ^ static_cast<const uint8_t*>(code)[i]) * 1099511628211ull;
+    FL_LOG(shaders, "%s %p: %zu bytes, fnv %016llx", stage, static_cast<void*>(wrapper_of(dxvk_obj)),
+           static_cast<size_t>(len), static_cast<unsigned long long>(h));
+}
+
 #define FL_SHADER_CREATE(Stage, desktop_slot, vtfn, iid)                                                        \
     WINAPI HRESULT dev_Create##Stage(Iface* self, const void* code, SIZE_T len, const void* linkage, void** out) { \
         void* obj = nullptr;                                                                                    \
         HRESULT hr = dx<HRESULT>(dev_of(self)->dxvk, desktop_slot, code, len, unwrap(linkage),                  \
                                  out ? &obj : nullptr);                                                         \
         if (hr < 0) shader_failed("Create" #Stage, code, len, hr);                                              \
-        return wrap(dev_of(self), hr, obj, out, vtfn(), u"D3D11" #Stage, iid);                                  \
+        HRESULT r = wrap(dev_of(self), hr, obj, out, vtfn(), u"D3D11" #Stage, iid);                             \
+        if (hr >= 0) log_shader(#Stage, obj, code, len);                                                         \
+        return r;                                                                                               \
     }
 FL_SHADER_CREATE(VertexShader, dd::CreateVertexShader, vs_vt, IID_ID3D11VertexShader)
 FL_SHADER_CREATE(GeometryShader, dd::CreateGeometryShader, gs_vt, IID_ID3D11GeometryShader)
@@ -85,7 +97,16 @@ WINAPI HRESULT dev_CreateInputLayout(Iface* self, const void* elems, UINT num, c
     void* obj = nullptr;
     HRESULT hr = dx<HRESULT>(dev_of(self)->dxvk, dd::CreateInputLayout, elems, num, code, len, out ? &obj : nullptr);
     if (hr < 0) FL_ERROR("d3d: CreateInputLayout(%u elements) failed: 0x%08x", num, static_cast<uint32_t>(hr));
-    return wrap(dev_of(self), hr, obj, out, layout_vt(), u"D3D11InputLayout", IID_ID3D11InputLayout);
+    HRESULT r = wrap(dev_of(self), hr, obj, out, layout_vt(), u"D3D11InputLayout", IID_ID3D11InputLayout);
+    if (hr >= 0 && log_enabled("shaders")) {
+        struct Elem { const char* name; UINT index, format, slot, offset, cls, step; };
+        const Elem* e = static_cast<const Elem*>(elems);
+        for (UINT i = 0; i < num; i++)
+            FL_LOG(shaders, "InputLayout %p [%u] %s%u fmt %u slot %u off %u class %u step %u",
+                   static_cast<void*>(wrapper_of(obj)), i, e[i].name, e[i].index, e[i].format, e[i].slot, e[i].offset,
+                   e[i].cls, e[i].step);
+    }
+    return r;
 }
 
 WINAPI HRESULT dev_CreateClassLinkage(Iface* self, void** out) {

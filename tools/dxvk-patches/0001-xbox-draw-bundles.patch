@@ -1,0 +1,99 @@
+diff --git a/src/d3d11/d3d11_cmdlist.h b/src/d3d11/d3d11_cmdlist.h
+index 83456e1d..6b5e0520 100644
+--- a/src/d3d11/d3d11_cmdlist.h
++++ b/src/d3d11/d3d11_cmdlist.h
+@@ -5,6 +5,12 @@
+ #include "d3d11_context.h"
+ 
+ namespace dxvk {
++
++  // forza-linux: a deferred context created with this flag records an Xbox
++  // "draw bundle": its command list runs on the executing context's current
++  // state (render targets, viewports, bindings) instead of a cleared one, and
++  // the executing context's state is restored afterwards.
++  constexpr UINT D3D11_CONTEXT_FLAG_XBOX_BUNDLE = 0x20000;
+   
+   using D3D11ChunkDispatchProc = std::function<uint64_t (DxvkCsChunkRef&&, uint64_t, GpuFlushType)>;
+ 
+diff --git a/src/d3d11/d3d11_context.h b/src/d3d11/d3d11_context.h
+index 666ae132..eac36791 100644
+--- a/src/d3d11/d3d11_context.h
++++ b/src/d3d11/d3d11_context.h
+@@ -78,7 +78,9 @@ namespace dxvk {
+     constexpr static VkDeviceSize StagingBufferSize = 256ull << 10;
+   protected:
+     // Compile-time debug flag to force lazy binding on (True) or off (False)
+-    constexpr static Tristate DebugLazyBinding = Tristate::Auto;
++    // forza-linux: bindings are applied eagerly so that Xbox draw bundles
++    // (see d3d11_cmdlist.h) see every binding of the context executing them.
++    constexpr static Tristate DebugLazyBinding = Tristate::False;
+   public:
+     
+     D3D11CommonContext(
+diff --git a/src/d3d11/d3d11_context_def.cpp b/src/d3d11/d3d11_context_def.cpp
+index d58774c3..6277a9cf 100644
+--- a/src/d3d11/d3d11_context_def.cpp
++++ b/src/d3d11/d3d11_context_def.cpp
+@@ -146,11 +146,16 @@ namespace dxvk {
+           BOOL                RestoreContextState) {
+     D3D10DeviceLock lock = LockContext();
+ 
++    auto commandList = static_cast<D3D11CommandList*>(pCommandList);
++    bool bundle = commandList->GetContextFlags() & D3D11_CONTEXT_FLAG_XBOX_BUNDLE;
++
+     // Clear state so that the command list can't observe any
+     // current context state. The command list itself will clean
+     // up after execution to ensure that no state changes done
+     // by the command list are visible to the immediate context.
+-    ResetCommandListState();
++    // forza-linux: draw bundles inherit the current state instead.
++    if (!bundle)
++      ResetCommandListState();
+ 
+     // Flush any outstanding commands so that
+     // we don't mess up the execution order
+@@ -158,11 +163,10 @@ namespace dxvk {
+     
+     // Record any chunks from the given command list into the
+     // current command list and deal with context state
+-    auto commandList = static_cast<D3D11CommandList*>(pCommandList);
+     m_chunkId = m_commandList->AddCommandList(commandList);
+     
+     // Restore deferred context state
+-    if (RestoreContextState)
++    if (RestoreContextState || bundle)
+       RestoreCommandListState();
+     else
+       ResetContextState();
+diff --git a/src/d3d11/d3d11_context_imm.cpp b/src/d3d11/d3d11_context_imm.cpp
+index 2120f718..ef3a1b1f 100644
+--- a/src/d3d11/d3d11_context_imm.cpp
++++ b/src/d3d11/d3d11_context_imm.cpp
+@@ -230,6 +230,7 @@ namespace dxvk {
+     D3D10DeviceLock lock = LockContext();
+ 
+     auto commandList = static_cast<D3D11CommandList*>(pCommandList);
++    bool bundle = commandList->GetContextFlags() & D3D11_CONTEXT_FLAG_XBOX_BUNDLE;
+ 
+     // Reset dirty binding tracking before submitting any CS chunks.
+     // This is needed so that any submission that might occur during
+@@ -240,7 +241,9 @@ namespace dxvk {
+     // current context state. The command list itself will clean
+     // up after execution to ensure that no state changes done
+     // by the command list are visible to the immediate context.
+-    ResetCommandListState();
++    // forza-linux: draw bundles inherit the current state instead.
++    if (!bundle)
++      ResetCommandListState();
+ 
+     // Flush any outstanding commands so that
+     // we don't mess up the execution order
+@@ -266,7 +269,7 @@ namespace dxvk {
+     });
+ 
+     // Restore the immediate context's state
+-    if (RestoreContextState)
++    if (RestoreContextState || bundle)
+       RestoreCommandListState();
+     else
+       ResetContextState();

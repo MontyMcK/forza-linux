@@ -122,6 +122,9 @@ HRESULT create_resource(DeviceX* dev, int dim, const uint32_t* xd, const void* i
         return hr;
     }
     auto* r = new Resource(di.name, dev, di.vt(), obj, dim, xd, di.xbox_size);
+    if (e0 || e1)
+        FL_LOG(esram, "%s %ux%u fmt %u bind 0x%x: extra fields 0x%x 0x%x -> dxvk %p", di.what, xd[0], dim >= 3 ? xd[1] : 1,
+               xd[dim == 3 ? 4 : dim == 4 ? 4 : 3], d[di.bind], e0, e1, obj);
     // MipLevels 0 asks for the full chain; GetDesc must then report the real
     // count (the game sizes its per-mip view arrays from it, e.g. the
     // reflection pyramid at game rva 0x10d8bb0). Desktop texture GetDesc = slot 10.

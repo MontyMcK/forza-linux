@@ -1,6 +1,6 @@
 # Plan: Forza Horizon 2 (Xbox One) running natively on Linux
 
-**Current phase: Phase 5, the 3D frame.** The game now loads the world after the title and renders ~870 draws a frame without crashing, but the frame is black: its draw bundles need state inheritance (task below). Earlier state: The game boots through the intro movies to a correct **title screen** (Bink background video, logo, A-button glyph; milestone (b)) with DualSense/keyboard input and the real FMOD engine (banks load; SHAPE/XMA voices still silent). Pressing A creates a profile in ConnectedStorage, goes through offline Live, and starts loading; the loader now drives the DMA engine context (PLAN 5b). (Update this line whenever a phase completes.)
+**Current phase: Phase 5, the 3D frame.** The game loads the world after the title and renders ~900 draws a frame without crashing; with draw-bundle inheritance the 3D scene renders (visible in frame-trace dumps), but the final image is still black because the tonemap pass outputs 0 (task below). Earlier state: The game boots through the intro movies to a correct **title screen** (Bink background video, logo, A-button glyph; milestone (b)) with DualSense/keyboard input and the real FMOD engine (banks load; SHAPE/XMA voices still silent). Pressing A creates a profile in ConnectedStorage, goes through offline Live, and starts loading; the loader now drives the DMA engine context (PLAN 5b). (Update this line whenever a phase completes.)
 
 ## The big idea (read before writing any code)
 
@@ -168,7 +168,10 @@ The hardest phase. The order matters.
 - [ ] The R8_UINT SRV on an R11G11B10_FLOAT texture that DXVK rejects (game keeps going; find the call site and what it's for).
 - [x] Depth+stencil XG layouts: [HTILE] DEPTH [STENCIL] with xg_x's usages and HTILE size (FINDINGS §3.2).
 - [ ] XG colour render targets: CMASK (+FMASK) planes after the colour plane (xg_x rva 0x1770, FUN_180005220); STUB today.
-- [ ] **Draw bundles (blocks the 3D frame):** deferred contexts created with flag bit 17 (0x60000/0xa0000) inherit the executing context's state (FINDINGS §5b). Implement inheritance (patch DXVK's deferred context, or record/replay ourselves).
+- [x] **Draw bundles:** deferred contexts created with flag bit 17 inherit the executing context's state: DXVK patch tools/dxvk-patches/0001-xbox-draw-bundles.patch (FINDINGS §5b). The 3D scene now renders.
+- [ ] **Tonemap writes 0 (blocks the picture):** the last full-screen pass outputs exactly 0 although its inputs look sane (LOG 2026-10-26 later, FINDINGS §5b post-processing chain). Suspect a NaN (motion-blur branch) or one unchecked input.
+- [ ] Deferred/G-buffer geometry: lit objects are black silhouettes and the main depth reads 1.0 at post-processing.
+- [ ] ESRAM aliasing: resources share ESRAM offsets (FINDINGS §5b); find out whether any pass reads through an alias what another wrote.
 - [ ] Untiler speed: per-element addrlib calls are fine for BC textures, slow for big uncompressed ones; cache the per-macro-tile pattern.
 - [ ] GPU→CPU: placement memory the GPU writes (render targets the CPU reads back) is not synced back.
 - [ ] Unified memory: on Xbox the CPU and GPU share RAM, and the game may write GPU data directly (placement resources, `D3DMapEsramMemory`, "fast semantics" with no Map/Unmap).
