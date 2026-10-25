@@ -1,6 +1,6 @@
 # Plan: Forza Horizon 2 (Xbox One) running natively on Linux
 
-**Current phase: Phase 5 (graphics) + Phase 4 leftovers.** The game creates its device, resources, shaders and swap chain on DXVK and **presents its first frame** in an SDL window. It then signs in a fake local user and stops loading `Microsoft.Xbox.Services.dll` (Xbox Live, from the package) because of missing C++/CX/PPL runtime imports (FINDINGS §4d). Phases 1–4 are done apart from the open items listed in them. (Update this line whenever a phase completes.)
+**Current phase: Phase 5, the 3D frame.** The game now loads the world after the title and renders ~870 draws a frame without crashing, but the frame is black: its draw bundles need state inheritance (task below). Earlier state: The game boots through the intro movies to a correct **title screen** (Bink background video, logo, A-button glyph; milestone (b)) with DualSense/keyboard input and the real FMOD engine (banks load; SHAPE/XMA voices still silent). Pressing A creates a profile in ConnectedStorage, goes through offline Live, and starts loading; the loader now drives the DMA engine context (PLAN 5b). (Update this line whenever a phase completes.)
 
 ## The big idea (read before writing any code)
 
@@ -56,6 +56,8 @@ research/private/        (gitignored) anything derived from the game
 
 ## Decisions
 
+- 2026-10-25: Azimuth is the reference for *architecture*, not just answers: compare its design (FINDINGS §6) before patching symptoms. Its zero-copy title memory is why it runs where our copy model keeps failing.
+
 Add a line whenever a decision is made: `- YYYY-MM-DD: decision, reason`.
 
 - 2026-10-23: Native ELF loader + HLE instead of Wine + shim DLLs. The user wants native Linux, and the API surface is small and known.
@@ -68,7 +70,7 @@ Add a line whenever a decision is made: `- YYYY-MM-DD: decision, reason`.
 - 2026-10-24: xg_x is reimplemented on AMD addrlib (vendored from Mesa, MIT) configured with the console's tile tables. Reason: assets are pre-tiled, so layouts must match the console's XG byte for byte; addrlib is what XG itself is built on.
 - 2026-10-25: Azimuth (a proprietary Windows launcher that runs this game on D3D12) is studied as a behaviour reference under Rule 1, like the Microsoft DLLs: facts only, no code. Reason: the user asked for it, and it documents (via its strings and RTTI) exactly the subsystems we're blocked on.
 - 2026-10-24: Package DLLs (Microsoft.Xbox.Services/GameChat/Input.Wheel from Mount/) are loaded and run, not reimplemented. Reason: they're the game's own dependencies and need only runtime imports we implement anyway; Xbox Live then runs offline.
-- (open) Project license. LGPL-2.1+ makes it easy to borrow Wine code (unwinder, CRT bits). Ask the user before the first public push.
+- (open) Project license. LGPL-2.1+ makes it easy to borrow Wine code (unwinder, CRT bits). The repo has been public (github.com/MontyMcK/forza-linux) since 2026-10-25 with no LICENSE file, i.e. all rights reserved by default: ask the user which one they want.
 
 ---
 
@@ -85,7 +87,7 @@ Goal: be able to answer "what does the game call, from where, with which argumen
 
 - [x] `pip install --user pefile capstone`. `tools/pe_info.py` prints sections, imports, TLS, load config. Run Python with `-P`, not `-I`: `-I` hides the user site-packages.
 - [x] `tools/rtti_dump.py`: walk MSVC x64 RTTI (CompleteObjectLocator → TypeDescriptor → ClassHierarchyDescriptor) and print `vtable RVA, class name, #methods` to `research/private/vtables.txt`. This is essential for naming D3D/WinRT interfaces later.
-- [ ] Install Ghidra (needs Java 21: `dnf install java-21-openjdk`, then download Ghidra from GitHub releases). Keep the project at `research/private/ghidra/`. Import the exe, and optionally reference DLLs from `EmbeddedXvd`.
+- [x] Ghidra 12.2 in `~/tools/ghidra_12.2_PUBLIC` (headless; `JAVA_HOME=~/.local/share/jdks/jdk-25.0.4.1+1`, `GHIDRA_HEADLESS_MAXMEM=24G` for the game exe). Projects: `research/private/game_ghidra` (fh2), `research/private/azimuth/ghidra`. `tools/ghidra/DecompileRefs.java` decompiles by `str:`/`fn:`/`addr:`/`callers:`/`vt:` query.
 - [x] Full disassembly: `llvm-objdump -d --no-show-raw-insn --section=.text <exe> > research/private/text.asm` (~1 min). Grep it by address.
 - [ ] Find the real start-up sequence: the entry point (CRT start) → `main`/`WinMain`-equivalent → `CoreApplication::Run(IFrameworkViewSource)`. Record the RVAs in FINDINGS.
 - [ ] Find the file I/O path convention: which drive or prefix is used to open `media/...`. Search for the strings `media`, `G:\`, `T:\` and the CreateFileW call sites.
@@ -137,11 +139,12 @@ Still open: input (`Windows.Xbox.Input.*`), User/Live/Storage classes (the game 
 - [ ] vccorlib110: Platform::Object/String/Exception/Delegate/event source helpers, and `GetActivationFactoryByPCWSTR` → our activation registry. Check Wine's `vccorlib` (in `dlls/vccorlib140`) for reference.
 - [ ] A WinRT authoring helper: a C++ template that builds ms_abi vtables for `IInspectable`-derived interfaces, so each new class is quick to add.
 - [ ] `CoreApplication::Run(IFrameworkViewSource)`: call `CreateView` → `Initialize(CoreApplicationView)` → `SetWindow(CoreWindow)` → `Load` → `Run`. CoreWindow is backed by an **SDL3 window**. `CoreDispatcher::ProcessEvents` pumps SDL events.
-- [ ] `Windows.Xbox.System.User`: a single fake signed-in local user ("Player").
-- [ ] `Windows.Xbox.Input.Controller` / `IGamepad` / `IGamepadReading`: SDL3 gamepad, with keyboard fallback. Wheel support comes later.
-- [ ] `ConnectedStorageSpace` → directory under `~/.local/share/forza-linux/saves/`.
+- [x] `Windows.Xbox.System.User`: a single fake signed-in local user ("Player").
+- [x] `Windows.Xbox.Input.Controller` / `IGamepad` / `IGamepadReading`: SDL3 gamepad (DualSense verified), with keyboard fallback. `FL_AUTOPRESS="30:A,33:Menu"` scripts presses for unattended tests. Wheel support comes later.
+- [x] `ConnectedStorageSpace` → `~/.local/share/forza-linux/saves/<xuid>/<container>/<blob>` with atomic container commits (connected_storage.cpp, FINDINGS §4f). ReadAsync / property sets / blob queries still trap (unused so far).
 - [ ] Xbox Live, Party, Multiplayer, Achievements, Store, Kinect, Speech, GameChat, ClipCapture: **offline stubs** that report "not signed in / not available" through the documented failure paths (`E_FAIL`/async errors), not crashes.
-- [ ] Async operations (`IAsyncOperation<T>`, `Completed` handlers): one generic implementation that completes on a worker thread.
+- [x] Async operations (`IAsyncOperation<T>`, `Completed` handlers): async.cpp, completed before they are returned.
+- [x] **Offline Xbox Live:** token requests fail with 0x800704CF like Azimuth; the session job's task-based continuation catches it once C++/CX exceptions keep their dynamic type (FINDINGS §4g, §5a). Still open: SecureDeviceAssociationTemplate (offline template from the manifest, as Azimuth) and AchievementNotifier.
 
 Done when: the game's main/render threads start, it loads data from `media/`, and it reaches its first `D3D11XCreateDeviceX` call.
 
@@ -158,25 +161,41 @@ The hardest phase. The order matters.
 - [x] Resources, views, shaders, states, queries (resources.cpp, pipeline.cpp), placement buffers/textures + write-tracked uploads (placement.cpp, gpumem.cpp), D3DMapEsramMemory.
 - [x] xg_x: tile modes, layouts, texture computers (src/hle/xg), GCN untiler via addrlib, verified against real assets.
 - [x] Swap chain on an SDL3 window (dxgi.cpp, platform/window.cpp), DXGIXPresentArray, screenshots.
-- [ ] Context Xbox-only slots 144–260 as the game hits them (160–193: per-stage binds by CPU pointer; see FINDINGS §3.1).
+- [ ] Context Xbox-only slots 144–260 as the game hits them. Names for all of them: FINDINGS §3.1 (from Azimuth). Done: 151–155, 160–177, 196, 197, 209, 214; next likely 178–193 (placement binds by CPU pointer).
+- [x] **Xbox draw ABI**: DrawIndexed/DrawIndexedInstanced/DrawInstanced pack argument pairs into 64-bit registers (FINDINGS §3.1); fixing it made the title screen's video and UI appear.
+- [x] DXVK/RADV crashes around 31 s: the game overran a 3D texture because our XG reported a whole-level `Slice2DSizeBytes` (fixed), corrupting the C heap that XMem blocks shared with DXVK (XMem now gets its own mappings); plus immediate-context use from two threads (DXVK lock on).
+- [x] Frame trace: `FL_TRACE_FRAME=N[,M]` logs every draw/dispatch/copy/clear/map/upload with bound shaders, textures and targets; `FL_TRACE_DUMP=1` also saves inputs and targets as PNGs in `screenshots/trace/`.
 - [ ] The R8_UINT SRV on an R11G11B10_FLOAT texture that DXVK rejects (game keeps going; find the call site and what it's for).
-- [ ] Depth+stencil XG layouts: plane order/usage values unverified (xg.cpp STUB).
+- [x] Depth+stencil XG layouts: [HTILE] DEPTH [STENCIL] with xg_x's usages and HTILE size (FINDINGS §3.2).
+- [ ] XG colour render targets: CMASK (+FMASK) planes after the colour plane (xg_x rva 0x1770, FUN_180005220); STUB today.
+- [ ] **Draw bundles (blocks the 3D frame):** deferred contexts created with flag bit 17 (0x60000/0xa0000) inherit the executing context's state (FINDINGS §5b). Implement inheritance (patch DXVK's deferred context, or record/replay ourselves).
 - [ ] Untiler speed: per-element addrlib calls are fine for BC textures, slow for big uncompressed ones; cache the per-macro-tile pattern.
 - [ ] GPU→CPU: placement memory the GPU writes (render targets the CPU reads back) is not synced back.
 - [ ] Unified memory: on Xbox the CPU and GPU share RAM, and the game may write GPU data directly (placement resources, `D3DMapEsramMemory`, "fast semantics" with no Map/Unmap).
   - Plan A: back game "graphics" allocations with Vulkan host-visible memory, or import them with **`VK_EXT_external_memory_host`** (RADV supports it), so GPU buffers alias the game's pointers.
   - Plan B: shadow copies plus dirty tracking (write-protect pages, then sync before each draw). Slower but simpler.
 - [ ] Textures: if the game uses `xg_x` layouts / GCN tile modes, write an **untiler** (CPU first, compute shader later). Check what tile mode the game requests (Phase 1).
-- [ ] Present: `DXGIXPresentArray` → DXVK swapchain on the SDL window. Handle 1080p/900p internal resolution scaling.
-- [ ] **Screenshot automation** (needed so agents can verify progress): env `FL_SCREENSHOT_AT_FRAME=N` dumps the swapchain to `screenshots/frame_N.png` (gitignored), and `FL_EXIT_AFTER_FRAME=M` quits. Agents then read the PNG to check progress.
+- [x] Present: `DXGIXPresentArray` → DXVK swapchain on the SDL window. (1080p/900p scaling still to check.)
+- [x] **Screenshot automation** (needed so agents can verify progress): env `FL_SCREENSHOT_AT_FRAME=N` dumps the swapchain to `screenshots/frame_N.png` (gitignored), and `FL_EXIT_AFTER_FRAME=M` quits. Agents then read the PNG to check progress.
 - [ ] RenderDoc capture support: works with DXVK, so document how to use it in LOG.
 
 Milestones: (a) clear-colour frame, (b) the 2D boot logos/menus, (c) the 3D garage/car, (d) driving in the open world.
 
+## Phase 5b: memory model like Azimuth (FINDINGS §6) — the current direction
+
+Azimuth runs the game because the GPU reads the game's memory directly. Our copy-and-track model is what keeps breaking. In order:
+- [x] **Change tracking without mprotect.** gpumem now uses userfaultfd async write-protect + `PAGEMAP_SCAN` (the Linux GetWriteWatch). No fault hook, kernel writes are recorded. `FL_CHECK_TRACKING=1` hashes every skipped upload to catch misses.
+- [x] DMA engine context: every slot the game uses (9, 10, 16–19, 21, 22, 24; FINDINGS §3.1) runs on the CPU or on the immediate DXVK context (dma.cpp).
+- [ ] DMA fills/copies into GPU-owned placement resources (depth clears: HTILE 0xffffffff + depth 1.0f, rva 0x1131b85) must become ClearDepthStencilView / copies on the DXVK resource; today they only reach game memory.
+- [ ] **Zero-copy placement buffers.** Import the game's memory into Vulkan with VK_EXT_external_memory_host (RADV supports it) and create the DXVK buffer over it: needs a small interop entry point in our DXVK build (third_party/dxvk), page-aligned import ranges (title memory reserved in 64 KB-aligned chunks), and GPU→CPU visibility for free. Decide with the user: patch DXVK, or move to D3D12 on vkd3d-proton like Azimuth (`OpenExistingHeapFromAddress` exists there).
+- [ ] ESRAM with a real shared backing (memfd + MAP_SHARED views) so aliased mappings agree.
+- [ ] Title memory bookkeeping: one reservation for graphics memory; releases withdraw GPU heaps over them (Azimuth "withdraw the heaps over title memory").
+
 ## Phase 6: audio and video
 
-- [ ] `ActivateAudioInterfaceAsync` → our `IAudioClient`/`IAudioRenderClient`/`IAudioClock`, backed by an SDL3 audio stream (48 kHz float). This is probably FMOD's output path.
-- [ ] AcpHal / SHAPE: RE the context structs FMOD fills (XMA input buffers, PCM output). Decode **XMA2** in software with **FFmpeg's `xma2` decoder** (libavcodec). Implement `ApuAlloc`/`ApuMapVirtualAddress` as an address-mapping table.
+- [x] `ActivateAudioInterfaceAsync` → our `IAudioClient2`/`IAudioRenderClient`/`IAudioClock`, backed by an SDL3 audio stream (48 kHz float stereo, PipeWire). FMOD's output path (FINDINGS §4). `FL_AUDIO=null` drops audio.
+- [x] AcpHal heaps, SHAPE context arrays, IAcpHal command/message queues with a 128-sample ACP clock (FINDINGS §4).
+- [ ] SHAPE flowgraph execution: decode the SHAPE commands FMOD puts in its 0x3000-byte flowgraph buffer and the 64-byte XMA contexts, then decode **XMA2** with FFmpeg's `xma2` decoder (Azimuth uses a modified FFmpeg: one stream per decoder, every frame output immediately; check whether Fedora's ffmpeg-free has xma2).
 - [ ] `xaudio2_9.dll` (dynamically loaded): provide it from the HLE registry via **FAudio**, which implements the XAudio2 API, if the game actually loads it.
 - [ ] Media Foundation `MFCreateSourceReaderFromURL`: find out what it plays. Stub or implement with FFmpeg.
 - [ ] Bink runs as game code, so it should just work once audio and textures work.

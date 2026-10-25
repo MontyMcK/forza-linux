@@ -27,7 +27,7 @@ struct SurfaceDesc {
 struct MipLayout {
     uint64_t offset = 0;      // from the start of the surface
     uint64_t size = 0;        // all slices
-    uint64_t slice_size = 0;  // one slice (2D) / the whole level (3D)
+    uint64_t slice_size = 0;  // one slice (2D array) / one depth slice (3D)
     uint32_t pitch = 0;       // padded width, in elements
     uint32_t padded_height = 0;
     uint32_t padded_depth = 0;

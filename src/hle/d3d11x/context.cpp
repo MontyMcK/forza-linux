@@ -9,9 +9,16 @@
 #include <unordered_map>
 
 #include "common/log.h"
+#include "hle/d3d11x/trace.h"
 #include "hle/d3d11x/d3d11x.h"
 #include "hle/d3d11x/dxvk.h"
 #include "loader/imports.h"
+#include <sys/syscall.h>
+#include <dlfcn.h>
+#include <mutex>
+#include <map>
+#include <atomic>
+#include <unistd.h>
 #include "loader/pe_image.h"
 
 namespace fl::d3d {
@@ -20,7 +27,27 @@ namespace {
 namespace dc = desktop::ctx;
 using C = ContextX;
 
-void* ctxdx(void* self) { return C::from(self)->dxvk; }
+// FL_LOG=ctxthreads: log when a context is used by a different thread than
+// its previous call (D3D11 contexts are single-threaded). Diagnostic only.
+__attribute__((noinline)) void note_context_user(ContextX* c) {
+    static std::mutex m;
+    static std::map<ContextX*, pid_t> last;
+    static thread_local pid_t tid = static_cast<pid_t>(syscall(SYS_gettid));
+    void* ra = __builtin_return_address(0);
+    std::lock_guard lock(m);
+    pid_t& prev = last[c];
+    if (prev != tid) {
+        if (prev) FL_LOG(ctxthreads, "%s context %p: thread %d after thread %d (in %p)", c->deferred ? "deferred" : "immediate", c, tid, prev, ra);
+        prev = tid;
+    }
+}
+
+__attribute__((always_inline)) inline void* ctxdx(void* self) {
+    C* c = C::from(self);
+    static const bool check = log_enabled("ctxthreads");
+    if (check) note_context_user(c);
+    return c->dxvk;
+}
 
 ULONG add_ref(C* c) { return c->deferred ? ++c->refs : c->device->add_ref(); }
 
@@ -218,22 +245,42 @@ WINAPI void ctx_IAGetPrimitiveTopology(void* self, int* topo) {
 }
 
 // ---- Draws and dispatches ----
+// The Xbox draw methods pack pairs of 32-bit arguments into one 64-bit
+// register (umd slots 13/21/22 split them with shr 32 and put the halves in
+// the DRAW_INDEX_OFFSET_2 / NUM_INSTANCES packets, FINDINGS §3.1c):
+//   13 DrawIndexed(u64 start index | index count << 32, INT base vertex)
+//   14 Draw(UINT vertex count, UINT start vertex)                (desktop)
+//   21 DrawIndexedInstanced(u64 start index | count << 32, u64 base vertex | start instance << 32, UINT instances)
+//   22 DrawInstanced(UINT vertex count, u64 start vertex | start instance << 32, UINT instances)
 
-WINAPI void ctx_DrawIndexed(void* self, UINT count, UINT start, INT base) {
+WINAPI void ctx_DrawIndexed(void* self, uint64_t start_count, INT base) {
+    UINT start = static_cast<UINT>(start_count), count = static_cast<UINT>(start_count >> 32);
     apply_inline_state(C::from(self));
+    trace::draw(ctxdx(self), "DrawIndexed", count, start, base);
     dx<void>(ctxdx(self), dc::DrawIndexed, count, start, base);
+    trace::after_draw(ctxdx(self));
 }
 WINAPI void ctx_Draw(void* self, UINT count, UINT start) {
     apply_inline_state(C::from(self));
+    trace::draw(ctxdx(self), "Draw", count, start);
     dx<void>(ctxdx(self), dc::Draw, count, start);
+    trace::after_draw(ctxdx(self));
 }
-WINAPI void ctx_DrawIndexedInstanced(void* self, UINT count, UINT instances, UINT start, INT base, UINT start_inst) {
+WINAPI void ctx_DrawIndexedInstanced(void* self, uint64_t start_count, uint64_t base_inst, UINT instances) {
+    UINT start = static_cast<UINT>(start_count), count = static_cast<UINT>(start_count >> 32);
+    INT base = static_cast<INT>(static_cast<uint32_t>(base_inst));
+    UINT start_inst = static_cast<UINT>(base_inst >> 32);
     apply_inline_state(C::from(self));
+    trace::draw(ctxdx(self), "DrawIndexedInstanced", count, instances, start);
     dx<void>(ctxdx(self), dc::DrawIndexedInstanced, count, instances, start, base, start_inst);
+    trace::after_draw(ctxdx(self));
 }
-WINAPI void ctx_DrawInstanced(void* self, UINT count, UINT instances, UINT start, UINT start_inst) {
+WINAPI void ctx_DrawInstanced(void* self, UINT count, uint64_t start_inst64, UINT instances) {
+    UINT start = static_cast<UINT>(start_inst64), start_inst = static_cast<UINT>(start_inst64 >> 32);
     apply_inline_state(C::from(self));
+    trace::draw(ctxdx(self), "DrawInstanced", count, instances, start);
     dx<void>(ctxdx(self), dc::DrawInstanced, count, instances, start, start_inst);
+    trace::after_draw(ctxdx(self));
 }
 WINAPI void ctx_DrawAuto(void* self) {
     apply_inline_state(C::from(self));
@@ -247,7 +294,11 @@ WINAPI void ctx_DrawInstancedIndirect(void* self, void* buf, UINT offset) {
     apply_inline_state(C::from(self));
     dx<void>(ctxdx(self), dc::DrawInstancedIndirect, bind_unwrap(ctxdx(self), buf), offset);
 }
-WINAPI void ctx_Dispatch(void* self, UINT x, UINT y, UINT z) { dx<void>(ctxdx(self), dc::Dispatch, x, y, z); }
+WINAPI void ctx_Dispatch(void* self, UINT x, UINT y, UINT z) {
+    trace::draw(ctxdx(self), "Dispatch", x, y, z);
+    dx<void>(ctxdx(self), dc::Dispatch, x, y, z);
+    trace::after_draw(ctxdx(self));
+}
 WINAPI void ctx_DispatchIndirect(void* self, void* buf, UINT offset) {
     dx<void>(ctxdx(self), dc::DispatchIndirect, bind_unwrap(ctxdx(self), buf), offset);
 }
@@ -272,6 +323,7 @@ WINAPI HRESULT ctx_Map(void* self, void* res, UINT sub, UINT type, UINT flags, v
         return S_OK;
     }
     if (flags & ~0x100000u) log_once("Map: Xbox-only map flags", flags);
+    if (trace::active()) trace::event("Map [%s] sub %u type %u", trace::describe_dxvk(unwrap(res)), sub, type);
     HRESULT hr = dx<HRESULT>(ctxdx(self), dc::Map, unwrap(res), sub, type, flags, mapped);
     if (hr < 0) {
         auto* r = static_cast<Resource*>(child_of(res));
@@ -287,20 +339,32 @@ WINAPI void ctx_Unmap(void* self, void* res, UINT sub) {
     dx<void>(ctxdx(self), dc::Unmap, unwrap(res), sub);
 }
 
+// Copy sources go through bind_unwrap: a placement source the CPU just wrote
+// must be uploaded before the GPU reads it, exactly as for a bind.
 WINAPI void ctx_CopySubresourceRegion(void* self, void* dst, UINT dst_sub, UINT x, UINT y, UINT z, void* src,
                                       UINT src_sub, const void* box) {
-    dx<void>(ctxdx(self), dc::CopySubresourceRegion, unwrap(dst), dst_sub, x, y, z, unwrap(src), src_sub, box);
+    void* s = bind_unwrap(ctxdx(self), src);
+    if (trace::active())
+        trace::event("CopySubresourceRegion dst[%s] sub %u at %u,%u <- src sub %u", trace::describe_dxvk(unwrap(dst)),
+                     dst_sub, x, y, src_sub);
+    dx<void>(ctxdx(self), dc::CopySubresourceRegion, unwrap(dst), dst_sub, x, y, z, s, src_sub, box);
 }
 WINAPI void ctx_CopySubresourceRegion1(void* self, void* dst, UINT dst_sub, UINT x, UINT y, UINT z, void* src,
                                        UINT src_sub, const void* box, UINT flags) {
-    dx<void>(ctxdx(self), dc::CopySubresourceRegion1, unwrap(dst), dst_sub, x, y, z, unwrap(src), src_sub, box,
-             flags);
+    dx<void>(ctxdx(self), dc::CopySubresourceRegion1, unwrap(dst), dst_sub, x, y, z, bind_unwrap(ctxdx(self), src),
+             src_sub, box, flags);
 }
 WINAPI void ctx_CopyResource(void* self, void* dst, void* src) {
-    dx<void>(ctxdx(self), dc::CopyResource, unwrap(dst), unwrap(src));
+    void* s = bind_unwrap(ctxdx(self), src);
+    if (trace::active())
+        trace::event("CopyResource dst[%s] <- src[%s]", trace::describe_dxvk(unwrap(dst)), trace::describe_dxvk(s));
+    dx<void>(ctxdx(self), dc::CopyResource, unwrap(dst), s);
 }
 WINAPI void ctx_UpdateSubresource(void* self, void* dst, UINT sub, const void* box, const void* data, UINT row,
                                   UINT depth) {
+    if (trace::active()) trace::event("UpdateSubresource [%s] sub %u row %u", trace::describe_dxvk(unwrap(dst)), sub, row);
+    FL_LOG(upload, "UpdateSubresource [%s] sub %u box %p row %u depth %u", trace::describe_dxvk(unwrap(dst)), sub, box, row,
+           depth);
     dx<void>(ctxdx(self), dc::UpdateSubresource, unwrap(dst), sub, box, data, row, depth);
 }
 WINAPI void ctx_UpdateSubresource1(void* self, void* dst, UINT sub, const void* box, const void* data, UINT row,
@@ -311,6 +375,8 @@ WINAPI void ctx_CopyStructureCount(void* self, void* dst, UINT offset, void* uav
     dx<void>(ctxdx(self), dc::CopyStructureCount, unwrap(dst), offset, unwrap(uav));
 }
 WINAPI void ctx_ClearRenderTargetView(void* self, void* rtv, const float* color) {
+    if (trace::active())
+        trace::event("ClearRenderTargetView %p (%.2f %.2f %.2f %.2f)", rtv, color[0], color[1], color[2], color[3]);
     dx<void>(ctxdx(self), dc::ClearRenderTargetView, unwrap(rtv), color);
 }
 WINAPI void ctx_ClearUnorderedAccessViewUint(void* self, void* uav, const UINT* values) {
@@ -458,6 +524,7 @@ WINAPI HRESULT ctx_FinishCommandList(void* self, BOOL restore, void** out) {
     }
     void* list = nullptr;
     HRESULT hr = dx<HRESULT>(c->dxvk, dc::FinishCommandList, restore, out ? &list : nullptr);
+    trace::event("FinishCommandList on deferred %p -> list %p (hr 0x%x)", self, list, static_cast<uint32_t>(hr));
     if (!restore) c->applied_topology_bits = 0;
     if (hr < 0 || !out) {
         if (hr < 0) FL_ERROR("d3d: FinishCommandList failed: 0x%08x", static_cast<uint32_t>(hr));
@@ -472,7 +539,9 @@ WINAPI HRESULT ctx_FinishCommandList(void* self, BOOL restore, void** out) {
 
 WINAPI void ctx_ExecuteCommandList(void* self, void* list, BOOL restore) {
     auto* c = C::from(self);
+    trace::event("ExecuteCommandList %p (dxvk %p) on %s %p", list, unwrap(list), c->deferred ? "deferred" : "immediate", self);
     dx<void>(c->dxvk, dc::ExecuteCommandList, unwrap(list), restore);
+    trace::after_draw(c->dxvk);
     if (!restore) c->applied_topology_bits = 0;  // DXVK cleared the state
 }
 WINAPI BOOL ctx_IsAnnotationEnabled(void* self) { return FALSE_; }
@@ -496,7 +565,18 @@ WINAPI void ctx_Slot196(void* self, BOOL on) {
 WINAPI void ctx_FlushGpuCaches(void*) {}                                   // 151: ACQUIRE_MEM, all caches
 WINAPI void ctx_FlushGpuCacheRange(void*, UINT flags, void*, uint64_t) {}  // 152: flags (0 = 0xc00000), base, size
 WINAPI void ctx_InsertWaitUntilIdle(void*, UINT) {}                        // 153: fence on own engine + wait
+// 154: InsertFence(flags) -> u64 fence value the game tracks (rva 0x1131b65
+// passes it to its fence list at rva 0x10cedb0). DXVK orders the work itself,
+// so a monotonically increasing value is enough; waits on it (155) are no-ops.
+WINAPI uint64_t ctx_InsertFence(void*, UINT) {
+    static std::atomic<uint64_t> fence{0};
+    return ++fence;
+}
 WINAPI void ctx_InsertWaitOnFence(void*, UINT, uint64_t) {}                // 155: wait on a fence value
+// 156-159 Remap{ConstantBuffer,ShaderResource,Sampler,VertexBuffer}Inheritance
+// (dst stage, dst slot, src stage, src slot; game rva 0x11a7765 passes PS 13,
+// PS 13). The reference umd's four slots are all `ret 0`, so do nothing too.
+WINAPI void ctx_RemapInheritance(void*, UINT, UINT, UINT, UINT) {}
 // 197: EVENT_WRITE of event `ev` (0x407 = CS_PARTIAL_FLUSH after dispatches).
 // 0x80000001 takes another umd path (0xa89b0) that we have not decoded.
 WINAPI void ctx_InsertGpuEvent(void*, int ev) {
@@ -511,6 +591,32 @@ WINAPI void ctx_InsertGpuEvent(void*, int ev) {
 WINAPI void ctx_WriteValueBottomOfPipe(void*, uint32_t* addr, uint32_t value) {
     __atomic_store_n(addr, value, __ATOMIC_RELEASE);
 }
+
+// 222 IASetPrimitiveResetIndex(u32): umd stores it at ctx+0xa024 for the
+// VGT reset index. D3D11/DXVK always cut strips at 0xFFFF / 0xFFFFFFFF, so
+// those values need nothing; any other value can't be expressed.
+WINAPI void ctx_IASetPrimitiveResetIndex(void*, uint32_t index) {
+    if (index != 0xFFFF && index != 0xFFFFFFFF) log_once("IASetPrimitiveResetIndex: unsupported reset index", index);
+}
+
+// 223 SetShaderResourceViewMinLOD(view, float): a per-view LOD clamp (umd
+// 0x17e60 writes it into the view's T#). D3D11's nearest is the per-resource
+// SetResourceMinLOD, applied to the view's resource.
+WINAPI void ctx_SetShaderResourceViewMinLOD(void* self, void* view, float min_lod) {
+    if (!view) return;
+    void* res = nullptr;
+    dx<void>(unwrap(view), 7 /* ID3D11View::GetResource */, &res);
+    if (!res) return;
+    log_once("SetShaderResourceViewMinLOD -> SetResourceMinLOD on the whole resource", 0);
+    dx<void>(ctxdx(self), dc::SetResourceMinLOD, res, min_lod);
+    dx_release(res);
+}
+
+// 240 SetResourceCompression(resource, flags): umd 0x17ec0 rewrites the
+// DCC/HTILE enable bits in the resource's descriptors (and in bound targets'
+// registers); the game passes flags 0 at rva 0x11420a3 while loading. Surface
+// compression is the driver's business under Vulkan, so nothing to do.
+WINAPI void ctx_SetResourceCompression(void*, void*, UINT) {}
 
 // ---- Xbox fast binds (slots 160-177) ----
 // One resource at a time, written straight into the constant-engine RAM:
@@ -684,11 +790,16 @@ void add_context_methods(void** t) {
     set(151, &ctx_FlushGpuCaches);
     set(152, &ctx_FlushGpuCacheRange);
     set(153, &ctx_InsertWaitUntilIdle);
+    set(154, &ctx_InsertFence);
     set(155, &ctx_InsertWaitOnFence);
+    for (int slot = 156; slot <= 159; slot++) set(slot, &ctx_RemapInheritance);
     set(196, &ctx_Slot196);
     set(197, &ctx_InsertGpuEvent);
     set(209, &ctx_ExecuteCompactCommands);
     set(214, &ctx_WriteValueBottomOfPipe);
+    set(222, &ctx_IASetPrimitiveResetIndex);
+    set(223, &ctx_SetShaderResourceViewMinLOD);
+    set(240, &ctx_SetResourceCompression);
 
     // bind_one stage codes: 0 VS, 1 HS, 2 DS, 3 GS, 4 PS, 5 CS; kinds: 0 SRV, 1 CB, 2 sampler.
     constexpr int kFastStages[6] = {4, 0, 3, 5, 1, 2};  // PS, VS, GS, CS, HS, DS

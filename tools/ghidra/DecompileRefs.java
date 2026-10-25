@@ -7,6 +7,9 @@
 //   str:<text>   functions referencing a defined string (ASCII or UTF-16) containing <text>
 //   fn:<text>    functions whose name (including namespace) contains <text>
 //   addr:<hex>   the function containing that address (image-relative or absolute)
+//   callers:<hex> every function that calls (or references) the function at that address
+//   vt:<text>    every function pointed to by a vftable whose symbol contains <text>
+//                (MSVC RTTI names them Class::vftable), in slot order
 //
 // Writes one <function>_<address>.c per function plus index.txt (query -> files).
 // Output describes the analysed binary: keep it in research/private/ (CLAUDE.md Rule 0/1).
@@ -53,11 +56,16 @@ public class DecompileRefs extends GhidraScript {
             Set<Function> fns = new LinkedHashSet<>();
             if (q.startsWith("str:")) fns.addAll(byString(q.substring(4)));
             else if (q.startsWith("fn:")) fns.addAll(byName(q.substring(3)));
+            else if (q.startsWith("vt:")) fns.addAll(byVtable(q.substring(3)));
+            else if (q.startsWith("callers:")) {
+                Address a = parseAddr(q.substring(8));
+                for (Reference r : getReferencesTo(a)) {
+                    Function f = getFunctionContaining(r.getFromAddress());
+                    if (f != null) fns.add(f);
+                }
+            }
             else if (q.startsWith("addr:")) {
-                long v = Long.parseUnsignedLong(q.substring(5).replace("0x", ""), 16);
-                Address base = currentProgram.getImageBase();
-                Address a = v < base.getOffset() ? base.add(v) : base.getNewAddress(v);
-                Function f = getFunctionContaining(a);
+                Function f = getFunctionContaining(parseAddr(q.substring(5)));
                 if (f != null) fns.add(f);
             }
             Set<String> files = new LinkedHashSet<>();
@@ -74,6 +82,12 @@ public class DecompileRefs extends GhidraScript {
         decomp.dispose();
     }
 
+    private Address parseAddr(String hex) {
+        long v = Long.parseUnsignedLong(hex.replace("0x", ""), 16);
+        Address base = currentProgram.getImageBase();
+        return v < base.getOffset() ? base.add(v) : base.getNewAddress(v);
+    }
+
     private Set<Function> byString(String needle) {
         Set<Function> out = new LinkedHashSet<>();
         DataIterator it = currentProgram.getListing().getDefinedData(true);
@@ -85,6 +99,31 @@ public class DecompileRefs extends GhidraScript {
             for (Reference r : getReferencesTo(d.getAddress())) {
                 Function f = getFunctionContaining(r.getFromAddress());
                 if (f != null) out.add(f);
+            }
+        }
+        return out;
+    }
+
+    private Set<Function> byVtable(String needle) {
+        Set<Function> out = new LinkedHashSet<>();
+        ghidra.program.model.symbol.SymbolIterator it = currentProgram.getSymbolTable().getAllSymbols(true);
+        while (it.hasNext()) {
+            ghidra.program.model.symbol.Symbol sym = it.next();
+            String n = sym.getName(true);
+            if (!n.contains(needle) || !n.endsWith("vftable")) continue;
+            Address a = sym.getAddress();
+            println("vftable " + n + " @ " + a);
+            for (int i = 0; i < 64; i++) {
+                try {
+                    long ptr = getLong(a.add(8L * i));
+                    Address t = a.getNewAddress(ptr);
+                    Function f = getFunctionAt(t);
+                    if (f == null) break;
+                    println("  slot " + i + " -> " + f.getName(true) + " @ " + t);
+                    out.add(f);
+                } catch (Exception e) {
+                    break;
+                }
             }
         }
         return out;

@@ -132,6 +132,16 @@ WINAPI HRESULT dev_CreateDeferredContext(Iface* self, UINT flags, void** out) {
 // Nothing of ours is deferred, so there is nothing to do.
 WINAPI void dev_ProcessDeferredFrees(Iface* self, UINT flags) {}
 
+// Xbox slots 60/61 (names from Azimuth's table): IsFencePending(u64 fence) and
+// IsResourcePending(resource) -> BOOL. The game spins on them (rva 0x10d7dda
+// waits on a DMA fence after LZ decompression; rva 0x114fee9 on a resource).
+// Our fences (context slot 154, DMA slot 16) stand for work that was already
+// done on the CPU or recorded in DXVK, which orders its own GPU work, so
+// nothing is ever pending. (Reading back memory the GPU writes is a separate
+// gap: PLAN Phase 5.)
+WINAPI BOOL dev_IsFencePending(Iface*, uint64_t) { return 0; }
+WINAPI BOOL dev_IsResourcePending(Iface*, void*) { return 0; }
+
 WINAPI HRESULT dev_SetExceptionMode(Iface* self, UINT flags) { return E_NOTIMPL; }  // umd: E_NOTIMPL
 WINAPI UINT dev_GetExceptionMode(Iface* self) { return 0; }                       // umd: 0
 
@@ -159,6 +169,8 @@ Vtable& device_vt() {
             // Slot 55: the first Xbox-only method. umd uses the same function as
             // GetImmediateContext, so: GetImmediateContextX.
             .set(55, &dev_GetImmediateContext)
+            .set(60, &dev_IsFencePending)
+            .set(61, &dev_IsResourcePending)
             .set(69, &dev_ProcessDeferredFrees);
         add_resource_methods(v);
         add_pipeline_methods(v);
@@ -187,6 +199,24 @@ WINAPI HRESULT D3D11XCreateDeviceX_(const CreateDeviceParams* p, void** out_devi
     }
     FL_LOG(d3d, "dxvk device created, feature level 0x%x", level);
     gpumem::init();
+
+    // The game uses the immediate context from more than one thread: the render
+    // thread draws while the main thread clears and copies textures it is
+    // loading (FL_LOG=ctxthreads shows it). A desktop D3D11 immediate context
+    // is single-threaded, and unsynchronized use corrupts DXVK's command stream
+    // (RADV then crashes copying into a stale image), so turn on DXVK's
+    // per-call lock (ID3D10Multithread slot 5 = SetMultithreadProtected).
+    {
+        constexpr GUID IID_ID3D10Multithread = {0x9B7E4E00, 0x342C, 0x4106, {0xA1, 0x9F, 0x4F, 0x27, 0x04, 0xF6, 0x89, 0xF0}};
+        void* mt = nullptr;
+        if (dx_query(ctx, IID_ID3D10Multithread, &mt) >= 0 && mt) {
+            dx<int>(mt, 5, 1);
+            FL_LOG(d3d, "immediate context multithread protection: %d", dx<int>(mt, 6));
+            dx_release(mt);
+        } else {
+            FL_ERROR("d3d: dxvk immediate context has no ID3D10Multithread; multi-threaded use is unprotected");
+        }
+    }
 
     auto* d = new DeviceX();
     d->dxvk = dev;

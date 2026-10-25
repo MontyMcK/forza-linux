@@ -3,10 +3,13 @@
 // descriptor, ORs an internal flag into MiscFlags, creates an ordinary resource
 // and binds it to the game's address. We create an ordinary DXVK resource and
 // copy the game memory into it when it changed (gpumem.h).
+#include <cstdlib>
+#include <atomic>
 #include <cstring>
 #include <sys/mman.h>
 
 #include "common/log.h"
+#include "hle/d3d11x/trace.h"
 #include "hle/d3d11x/d3d11x.h"
 #include "hle/d3d11x/dxvk.h"
 #include "hle/d3d11x/gpumem.h"
@@ -41,6 +44,7 @@ HRESULT create_placement(Iface* self, int dim, const uint32_t* xd, UINT tile_mod
         // The same layout our xg_x hands the game, so texels are where it put them.
         xg::TexDesc t{};
         t.dim = dim, t.tile_mode = tile_mode, t.pitch = pitch, t.samples = 1, t.depth = 1, t.height = 1;
+        t.bind = bind, t.misc = xd[dim == 2 ? 7 : dim == 3 ? 10 : 8];
         if (dim == 2) t.width = xd[0], t.mips = xd[1], t.array_size = xd[2], t.format = xd[3];
         if (dim == 3) t.width = xd[0], t.height = xd[1], t.mips = xd[2], t.array_size = xd[3], t.format = xd[4],
                       t.samples = xd[5];
@@ -97,8 +101,39 @@ HLE_EXPORT(d3d11_x, D3DMapEsramMemory, D3DMapEsramMemory_);
 
 void sync_placement(void* dxvk_ctx, Resource* r) {
     if (r->gpu_owned || !r->place_size) return;
-    if (!gpumem::dirty(r->place, r->place_size)) return;
+    // FL_NO_PLACEMENT_UPLOAD=tex|all: bisect aid, leaves textures (or all
+    // placement resources) un-uploaded.
+    static const char* skip = getenv("FL_NO_PLACEMENT_UPLOAD");
+    if (skip && (r->dim != 1 || skip[0] == 'a')) return;
+    // FL_CHECK_TRACKING=1 (diagnostic): verify "clean" answers against a hash
+    // of what we uploaded last time.
+    static const bool check = getenv("FL_CHECK_TRACKING") != nullptr;
+    auto hash = [](const uint8_t* p, size_t n) {
+        uint64_t h = 1469598103934665603ull;
+        for (size_t i = 0; i < n; i++) h = (h ^ p[i]) * 1099511628211ull;
+        return h;
+    };
+    if (!gpumem::dirty(r->place, r->place_size)) {
+        if (check && r->upload_hash && gpumem::mapped(r->place, r->place_size) && r->place_size <= (1u << 20) &&
+            hash(r->place, r->place_size) != r->upload_hash) {
+            static std::atomic<int> reported{0};
+            if (reported++ < 20)
+                FL_ERROR("gpumem: MISSED write: [%s] at %p size 0x%zx changed but reads clean", trace::describe_dxvk(r->dxvk),
+                         static_cast<void*>(r->place), r->place_size);
+        }
+        return;
+    }
+    if (!gpumem::mapped(r->place, r->place_size)) {
+        // The game released this memory and still binds the resource (Azimuth
+        // reports the same). Keep the last contents.
+        log_once("placement resource bound over released memory (not uploaded)", 0);
+        return;
+    }
     gpumem::begin_upload(r->place, r->place_size);
+    if (check && r->place_size <= (1u << 20)) r->upload_hash = hash(r->place, r->place_size);
+    FL_LOG(upload, "placement upload [%s] dim %d at %p size 0x%zx tile %u", trace::describe_dxvk(r->dxvk), r->dim,
+           static_cast<void*>(r->place), r->place_size, r->tile_mode);
+    if (trace::active()) trace::event("upload placement [%s]", trace::describe_dxvk(r->dxvk));
     if (r->dim == 1) {
         dx<void>(dxvk_ctx, dc::UpdateSubresource, r->dxvk, 0u, nullptr, static_cast<const void*>(r->place), 0u, 0u);
         return;
@@ -110,6 +145,14 @@ void sync_placement(void* dxvk_ctx, Resource* r) {
     std::vector<uint8_t> linear;
     for (uint32_t mip = 0; mip < mips; mip++) {
         const gcn::MipLayout& m = l.mips[mip];
+        if (!gpumem::readable(r->place + m.offset, m.size)) {
+            // Not committed yet: a streamed texture whose big mips have not
+            // arrived (the game clamps its LOD meanwhile). Uploaded once the
+            // game commits and writes them (the write marks them dirty).
+            FL_LOG(upload, "  mip %u at %p+0x%llx not committed: skipped", mip, static_cast<void*>(r->place + m.offset),
+                   (unsigned long long)m.size);
+            continue;
+        }
         size_t row = size_t(m.width) * d.bytes_per_element;
         size_t slice = row * m.height;
         if (r->dim == 4) {

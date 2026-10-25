@@ -12,12 +12,14 @@ namespace fl::xg {
 struct TexDesc {
     uint32_t dim;  // XG/D3D11 resource dimension: 2 tex1d, 3 tex2d, 4 tex3d
     uint32_t width, height, depth, array_size, mips, format, samples, tile_mode, pitch;
+    uint32_t bind = 0, misc = 0;  // D3D11 bind / misc flags: they decide the metadata planes
 };
 
 UINT optimal_tile_mode(UINT dim, UINT format, UINT width, UINT height, UINT array_size, UINT samples, UINT bind,
                        UINT misc);
 
-// Layout of plane 0 (colour, or depth). False if the descriptor is invalid.
+// Layout of the main surface plane (colour, or depth: not HTILE). Its offsets
+// are relative to that plane. False if the descriptor is invalid.
 bool layout_for(const TexDesc& t, gcn::SurfaceDesc* d, gcn::Layout* l);
 
 }  // namespace fl::xg

@@ -19,6 +19,7 @@ WINAPI HRESULT op_put_Completed(Iface* i, void* handler) {
     if (!handler) return S_OK;
     com_add_ref(handler);
     o->handler = handler;
+    if (o->pending) return S_OK;
     AsyncStatus st = o->error < 0 ? kError : kCompleted;
     return call_slot<HRESULT>(handler, 3, static_cast<void*>(&o->iop), static_cast<int32_t>(st));
 }
@@ -30,6 +31,7 @@ WINAPI HRESULT op_get_Completed(Iface* i, void** out) {
 }
 WINAPI HRESULT op_GetResults(Iface* i, void* out) {
     auto* o = op(i);
+    if (o->pending) return static_cast<HRESULT>(0x8000000E);  // E_ILLEGAL_METHOD_CALL: not finished
     if (o->error < 0) return o->error;
     if (o->write_result) o->write_result(out);
     return S_OK;
@@ -40,6 +42,7 @@ WINAPI HRESULT info_get_Id(Iface* i, uint32_t* out) {
     return S_OK;
 }
 WINAPI HRESULT info_get_Status(Iface* i, int32_t* out) {
+    if (op(i)->pending) return *out = kStarted, S_OK;
     *out = op(i)->error < 0 ? kError : kCompleted;
     return S_OK;
 }
@@ -86,6 +89,12 @@ void* async_result_ptr(const GUID& iid, void* object) {
         if (object) com_add_ref(object);
         *static_cast<void**>(out) = object;
     });
+    return o->default_iface_noref();
+}
+
+void* async_pending(const GUID& iid) {
+    auto* o = new AsyncOperation(iid, nullptr);
+    o->pending = true;
     return o->default_iface_noref();
 }
 

@@ -383,6 +383,13 @@ WINAPI HRESULT acp_submit(AcpHal* self, uint32_t type, uint64_t context, uint32_
     if (self->commands.size() >= self->cmd_cap) return 0x8AC80003;  // queue full
     Command c{type, id, context, arg, {}};
     if (n) memcpy(c.payload, data, n);
+    static std::atomic<int> logged{0};
+    if (logged++ < 40) {
+        uint32_t w0 = 0;
+        if (n >= 4) memcpy(&w0, c.payload, 4);
+        FL_LOG(audio, "ACP submit type %u context 0x%llx id 0x%x arg 0x%x payload[0] 0x%x", type,
+               (unsigned long long)context, id, arg, w0);
+    }
     self->commands.push_back(c);
     return S_OK;
 }

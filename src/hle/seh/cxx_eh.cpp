@@ -378,6 +378,17 @@ void cxx_throw(void* obj, void* throw_info, Context* ctx, bool heap_object) {
         FL_LOG(seh, "rethrow at game rva 0x%llx",
                static_cast<unsigned long long>(ctx->Rip - reinterpret_cast<uint64_t>(fl::loader::main_image().base)));
     } else {
+        // C++/CX (msvcr110 _CxxThrowException, rva 0x474c8): a ThrowInfo with
+        // TI_IsWinRT (0x10) is only the hat's static type. The real one is in
+        // the exception's WINRTEXCEPTIONINFO (pointer just before the object,
+        // ThrowInfo at +0x30), so `catch (COMException^)` sees a COMException
+        // rethrown through a Platform::Exception^ variable.
+        auto* ti = static_cast<const ThrowInfo*>(throw_info);
+        if (ti && (ti->attributes & 0x10) && obj) {
+            if (auto* p = *static_cast<uint8_t**>(obj))
+                if (auto* wei = *reinterpret_cast<uint8_t**>(p - 8))
+                    if (void* real = *reinterpret_cast<void**>(wei + 0x30)) throw_info = real;
+        }
         rec.ExceptionCode = kCxxExceptionCode;
         rec.ExceptionFlags = EXCEPTION_NONCONTINUABLE;
         rec.NumberParameters = heap_object ? 5 : 4;

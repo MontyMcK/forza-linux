@@ -1,5 +1,6 @@
 // Shared device-child plumbing: private data, the DXVK<->wrapper registry and
 // the ID3D11DeviceChild base slots.
+#include <cstdlib>
 #include <cstring>
 #include <set>
 #include <unordered_map>
@@ -145,6 +146,18 @@ DeviceChild::~DeviceChild() {
     device->release();
 }
 
+// FL_D3D_QUARANTINE=1: a wrapper released to zero is kept (with its DXVK
+// object) instead of freed, so a later use of it by the game fails loudly in
+// child_of() with a backtrace instead of corrupting DXVK. Diagnostic only.
+void DeviceChild::destroy() {
+    static const bool quarantine = getenv("FL_D3D_QUARANTINE") != nullptr;
+    if (!quarantine) {
+        delete this;
+        return;
+    }
+    magic = kDeadMagic;
+}
+
 DeviceChild* wrapper_of(void* dxvk_obj) {
     if (!dxvk_obj) return nullptr;
     std::lock_guard lock(g_reg_mutex);
@@ -156,6 +169,9 @@ DeviceChild* child_of(const void* game_iface) {
     if (!game_iface) return nullptr;
     auto* iface = static_cast<const Iface*>(game_iface);
     auto* c = static_cast<DeviceChild*>(iface->owner);
+    if (c && c->magic == DeviceChild::kDeadMagic)
+        fatal("d3d: the game used %p (%s), a D3D object it had released", game_iface,
+              utf16_to_utf8(c->class_name).c_str());
     if (!c || c->magic != DeviceChild::kMagic)
         fatal("d3d: the game passed %p where a D3D object of ours was expected", game_iface);
     return c;

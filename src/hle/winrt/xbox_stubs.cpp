@@ -2,6 +2,12 @@
 // proxy data (FINDINGS §4c). The whole package is on disk, so every chunk is
 // installed and transfer events never fire. Unknown slots trap.
 
+#include <cstdlib>
+#include <cstdio>
+#include <set>
+#include <cstring>
+#include <vector>
+#include "common/config.h"
 #include "common/log.h"
 #include "hle/winrt/activation.h"
 #include "hle/winrt/collections.h"
@@ -24,11 +30,40 @@ constexpr GUID IID_IPackageTransferWatcherStatics = {0xA306E506, 0x12F9, 0x460A,
                                                      {0xB0, 0xAE, 0x50, 0xBA, 0x32, 0x8C, 0x78, 0x6C}};
 constexpr GUID IID_IPackageTransferWatcher = {0xE74B8E43, 0xBA51, 0x4B09, {0xAD, 0x3F, 0x01, 0xBA, 0xFF, 0x31, 0xF9, 0x34}};
 
+// The package's chunks, from Mount/hash.manifest: 12-byte records from
+// offset 8, each starting with a u32 chunk id; ids >= 0x3fffffff are not
+// content chunks (FINDINGS §5b; Azimuth builds its installed-chunk set the
+// same way). The whole dump is on disk, so every listed chunk is installed.
+const std::set<uint32_t>& installed_chunks() {
+    static const std::set<uint32_t> chunks = [] {
+        std::set<uint32_t> out;
+        std::string path = fl::config().game_dir + "/hash.manifest";
+        if (FILE* f = fopen(path.c_str(), "rb")) {
+            std::vector<uint8_t> d;
+            uint8_t buf[65536];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof buf, f)) > 0) d.insert(d.end(), buf, buf + n);
+            fclose(f);
+            for (size_t off = 8; off + 4 <= d.size(); off += 12) {
+                uint32_t id;
+                memcpy(&id, d.data() + off, 4);
+                if (id < 0x3fffffff) out.insert(id);
+            }
+        }
+        if (out.empty()) FL_ERROR("PackageTransferManager: no chunk list in %s", path.c_str());
+        FL_LOG(winrt, "PackageTransferManager: %zu installed chunks from hash.manifest", out.size());
+        return out;
+    }();
+    return chunks;
+}
+
 struct PackageTransferManager : Object {
     // S+1: HRESULT (uint32 chunk_id, bool* installed). The caller caches positive
     // answers (rva 0x11d03c4). The whole package is on disk, so: always installed.
     static WINAPI HRESULT IsChunkInstalled(Iface*, uint32_t chunk, uint8_t* out) {
-        FL_LOG(winrt, "PackageTransferManager: chunk %u installed? -> yes", chunk);
+        // Unknown ids answer "installed" too: the dump has every file.
+        FL_LOG(winrt, "PackageTransferManager: chunk %u installed? -> yes%s", chunk,
+               installed_chunks().count(chunk) ? "" : " (not in hash.manifest)");
         *out = 1;
         return S_OK;
     }
@@ -37,9 +72,20 @@ struct PackageTransferManager : Object {
         *out = 1;
         return S_OK;
     }
+    // S+0: (IIterable<uint32> chunk ids, enum) and nothing out (proxy data):
+    // a request to move those chunks up the install order (game rva 0x11d0b1a,
+    // once the FMOD audio engine runs). Everything is installed, so there is
+    // nothing to reorder.
+    static WINAPI HRESULT UpdateInstallOrder(Iface*, void* chunks, int32_t behavior) {
+        FL_LOG(winrt, "PackageTransferManager: install order request (behavior %d): all installed", behavior);
+        return S_OK;
+    }
     static Vtable& vt() {
         static Vtable v =
-            Vtable("IPackageTransferManager", 11).set(S + 1, &IsChunkInstalled).set(S + 2, &AreChunksInstalled);
+            Vtable("IPackageTransferManager", 11)
+                .set(S + 0, &UpdateInstallOrder)
+                .set(S + 1, &IsChunkInstalled)
+                .set(S + 2, &AreChunksInstalled);
         return v;
     }
     Iface imgr{vt(), this};
@@ -65,6 +111,25 @@ struct PackageTransferManagerStatics : Object {
     }
 };
 
+// IChunkCompletedEventArgs {C1B7DCCE-7CCC-4A06-BA46-4B90E6A87D0B}: S+0 ChunkId.
+constexpr GUID IID_IChunkCompletedEventArgs = {0xC1B7DCCE, 0x7CCC, 0x4A06, {0xBA, 0x46, 0x4B, 0x90, 0xE6, 0xA8, 0x7D, 0x0B}};
+struct ChunkCompletedEventArgs : Object {
+    uint32_t chunk;
+    static WINAPI HRESULT get_ChunkId(Iface* i, uint32_t* out) {
+        *out = i->as<ChunkCompletedEventArgs>()->chunk;
+        return S_OK;
+    }
+    static Vtable& vt() {
+        static Vtable v = Vtable("IChunkCompletedEventArgs", S + 1).set(S + 0, &get_ChunkId);
+        return v;
+    }
+    Iface iargs{vt(), this};
+    explicit ChunkCompletedEventArgs(uint32_t c)
+        : Object(u"Windows.Xbox.Management.Deployment.ChunkCompletedEventArgs"), chunk(c) {
+        expose(IID_IChunkCompletedEventArgs, &iargs);
+    }
+};
+
 // ---------------------------------------------------------------- PackageTransferWatcher
 // IPackageTransferWatcher (13 slots): S+0 chunk ids, then ChunkCompleted,
 // ProgressChanged, TransferCompleted add/remove pairs. Nothing is transferring.
@@ -72,7 +137,24 @@ struct PackageTransferWatcher : Object {
     EventSource events[3];
     template <int E>
     static WINAPI HRESULT add(Iface* i, void* h, EventToken* t) {
-        return i->as<PackageTransferWatcher>()->events[E].add(h, t);
+        auto* w = i->as<PackageTransferWatcher>();
+        HRESULT hr = w->events[E].add(h, t);
+        // A whole-package watcher reports every chunk of the (fully installed)
+        // package as completed when the game subscribes. The game keeps an
+        // installed-chunk set fed by these events (handler rva 0x11ceaa0) and
+        // its FMOD bank loader only consults that set (rva 0x1012110 ->
+        // 0x11d0470): without it MasterBank.bank never loads, the title's
+        // BASE_PressStartMusic snapshot never starts and the splash never ends.
+        if (E == 0 && hr >= 0 && w->whole_package) {
+            const auto& chunks = installed_chunks();
+            FL_LOG(winrt, "PackageTransferWatcher: reporting %zu chunks completed", chunks.size());
+            for (uint32_t c : chunks) {
+                auto* args = new ChunkCompletedEventArgs(c);
+                winrt::call_slot<HRESULT>(h, 3, &w->iwatcher, args->default_iface_noref());
+                args->release();
+            }
+        }
+        return hr;
     }
     template <int E>
     static WINAPI HRESULT remove(Iface* i, EventToken t) {
@@ -89,6 +171,7 @@ struct PackageTransferWatcher : Object {
         return v;
     }
     Iface iwatcher{vt(), this};
+    bool whole_package = false;
     PackageTransferWatcher() : Object(u"Windows.Xbox.Management.Deployment.PackageTransferWatcher") {
         expose(IID_IPackageTransferWatcher, &iwatcher);
     }
@@ -102,7 +185,9 @@ struct PackageTransferWatcherStatics : Object {
     }
     static WINAPI HRESULT Create(Iface*, void* package, void** out) {
         FL_LOG(winrt, "PackageTransferWatcher::Create: nothing to watch, all installed");
-        return *out = (new PackageTransferWatcher())->default_iface_noref(), S_OK;
+        auto* w = new PackageTransferWatcher();
+        w->whole_package = true;
+        return *out = w->default_iface_noref(), S_OK;
     }
     static Vtable& vt() {
         static Vtable v =

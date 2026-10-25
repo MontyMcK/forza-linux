@@ -4,10 +4,13 @@
 // gameosproxy.dll (tools/midl_proxies.py, FINDINGS §4c): proc number = slot,
 // parameter directions/types are exact, method names are inferred from the
 // types (event delegate types name the events). S = 6 IInspectable slots.
+#include <cstdlib>
+
 #include "common/log.h"
 #include "common/wstr.h"
 #include "hle/winrt/activation.h"
 #include "hle/winrt/async.h"
+#include "loader/pe_image.h"
 #include "hle/winrt/collections.h"
 #include "hle/winrt/object.h"
 #include "hle/winrt/xbox.h"
@@ -111,7 +114,23 @@ struct User : Object {
     // S+10..S+12 GetTokenAndSignatureAsync(method, url, headers[, body]): Xbox
     // Live auth for HTTP requests. Offline: the operation fails like a request
     // with no network would, and Xbox Services reports the call as failed.
+    // FL_PROBE_ONLINE=1: walk the chain the game's session job (rva 0x1839500)
+    // null-checks to decide it's online, and log each object's vftable rva.
+    static void probe_online() {
+        auto base = reinterpret_cast<uintptr_t>(loader::main_image().base);
+        auto vrva = [&](void* o) -> unsigned long long {
+            return o ? (unsigned long long)(*reinterpret_cast<uintptr_t*>(o) - base) : 0;
+        };
+        void* p0 = reinterpret_cast<void*(WINAPI*)()>(base + 0x327270)();
+        void* p1 = p0 ? call_slot<void*>(p0, 0x48 / 8) : nullptr;
+        void** p2 = p1 ? call_slot<void**>(p1, 0xb0 / 8) : nullptr;
+        void* o3 = p2 ? *p2 : nullptr;
+        void* r = o3 ? call_slot<void*>(o3, 0x128 / 8) : nullptr;
+        fl::log_write("winrt", "probe: p0 %p vt 0x%llx; p1 %p vt 0x%llx; o3 %p vt 0x%llx; result %p vt 0x%llx", p0,
+                      vrva(p0), p1, vrva(p1), o3, vrva(o3), r, vrva(r));
+    }
     static WINAPI HRESULT GetTokenAndSignature(Iface*, HSTRING method, HSTRING url, HSTRING, void** out) {
+        if (getenv("FL_PROBE_ONLINE") && hstring_str(url).find(u"sessiondirectory") != std::u16string::npos) probe_online();
         FL_LOG(winrt, "User::GetTokenAndSignatureAsync(%s %s) -> offline", utf16_to_utf8(hstring_str(method)).c_str(),
                utf16_to_utf8(hstring_str(url)).c_str());
         *out = async_failed(IID_IAsyncOperation_GetTokenAndSignatureResult, kNetworkUnreachable);

@@ -15,13 +15,8 @@
 #include "hle/winrt/object.h"
 
 namespace fl::winrt {
-namespace {
 
-constexpr int S = kInspectableSlots;
-constexpr GUID IID_IXboxLiveConfigurationStatics = {0x00193376, 0x6A84, 0x4C67,
-                                                    {0x84, 0xA5, 0x3B, 0x8A, 0x8A, 0xAE, 0xA7, 0x12}};
-
-std::u16string manifest_attr(const char* key) {
+std::u16string xbox_live_manifest_attr(const char* key) {
     std::ifstream f(config().game_dir + "/AppxManifest.xml");
     std::stringstream ss;
     ss << f.rdbuf();
@@ -34,6 +29,14 @@ std::u16string manifest_attr(const char* key) {
     a += k.size();
     return utf8_to_utf16(xml.substr(a, xml.find('"', a) - a));
 }
+
+namespace {
+
+constexpr int S = kInspectableSlots;
+constexpr GUID IID_IXboxLiveConfigurationStatics = {0x00193376, 0x6A84, 0x4C67,
+                                                    {0x84, 0xA5, 0x3B, 0x8A, 0x8A, 0xAE, 0xA7, 0x12}};
+
+std::u16string manifest_attr(const char* key) { return xbox_live_manifest_attr(key); }
 
 struct XboxLiveConfigurationStatics : Object {
     static WINAPI HRESULT get_SandboxId(Iface*, HSTRING* out) { return make_hstring(u"XDKS.1", out); }

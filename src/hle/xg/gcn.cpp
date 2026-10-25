@@ -109,7 +109,10 @@ bool compute_layout(const SurfaceDesc& d, Layout* out) {
         uint64_t off = (out->size + o.baseAlign - 1) / o.baseAlign * o.baseAlign;
         m.offset = off;
         m.size = o.surfSize;
-        m.slice_size = o.sliceSize;
+        // addrlib's sliceSize is the whole level for a volume; XG's
+        // Slice2DSizeBytes (what the game steps z by, e.g. its linear 3D LUT
+        // fill at rva 0x13b38c0) is one depth slice.
+        m.slice_size = d.is_3d ? o.surfSize / std::max(1u, o.depth) : o.sliceSize;
         m.pitch = o.pitch;
         m.padded_height = o.height;
         m.padded_depth = o.depth;

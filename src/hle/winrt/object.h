@@ -68,9 +68,11 @@ struct Object {
     ULONG add_ref() { return ++refs; }
     ULONG release() {
         ULONG r = --refs;
-        if (r == 0) delete this;
+        if (r == 0) destroy();
         return r;
     }
+    // What a release to zero does (DeviceChild can quarantine instead).
+    virtual void destroy() { delete this; }
     // The default interface pointer (what you hand to the game), AddRef'd.
     void* default_iface() {
         add_ref();

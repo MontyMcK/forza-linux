@@ -9,6 +9,8 @@ namespace fl::loader {
 // Install SIGSEGV/SIGBUS/SIGILL/SIGFPE handlers that print a useful report
 // (fault address, registers, game RVAs) before dying.
 void install_crash_handler();
+// FL_BREAK one-shot breakpoints in game code (after the image is mapped).
+void arm_breakpoints();
 
 // Called first for every SIGSEGV. Return true if the fault was handled (the
 // faulting instruction is retried). Must be async-signal-safe.

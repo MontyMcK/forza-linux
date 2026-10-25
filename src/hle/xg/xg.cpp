@@ -73,9 +73,35 @@ struct Computer {
     void** vtbl;
     int refs = 1;
     ResourceLayout layout{};
-    Plane planes[2];
-    int num_planes = 1;
+    Plane planes[3];             // by layout plane index
+    bool has_surface[3] = {};    // false for metadata planes (HTILE): no texels
+    int num_planes = 0;
+    int main_plane = 0;          // the colour or depth surface
 };
+
+// XG_PLANE_USAGE values, as xg_x writes them (2D builder rva 0x1770, see FINDINGS §3.2).
+enum : uint32_t {
+    kUsageDefault = 1,
+    kUsageCmask = 2,
+    kUsageFmask = 3,
+    kUsageHtile = 4,
+    kUsageLuma = 5,     // two-plane formats not bound as depth (unverified names)
+    kUsageChroma = 6,
+    kUsageDepth = 7,
+    kUsageStencil = 8,
+};
+constexpr uint32_t kBindRenderTarget = 0x20, kBindDepthStencil = 0x40;
+constexpr uint32_t kMiscNoDepthCompression = 1u << 20, kMiscNoStencilCompression = 1u << 21;  // names ours
+
+// HTILE bytes for a depth surface, as xg_x's DB setup computes it (rva 0x59c0):
+// 4 bytes per 8x8 tile of the padded surface, which is first aligned to 128x64
+// (single slice of at most 2M pixels) or 512x512, rounded up to 16 KiB.
+uint64_t htile_bytes(uint32_t pitch, uint32_t height, uint32_t slices) {
+    bool small = static_cast<uint64_t>(pitch) * height <= 0x200000 && slices == 1;
+    uint32_t aw = small ? 128 : 512, ah = small ? 64 : 512;
+    uint64_t w = (pitch + aw - 1) / aw * aw, h = (height + ah - 1) / ah * ah;
+    return ((w / 8) * (h / 8) * slices * 4 + 0x3fff) & ~uint64_t(0x3fff);
+}
 
 uint32_t full_chain(uint32_t w, uint32_t h, uint32_t d) {
     uint32_t m = std::max(w, std::max(h, d)), n = 1;
@@ -113,7 +139,7 @@ HRESULT build(Computer* c, const TexDesc& t) {
     const FormatInfo& fi = format_info(t.format);
     if (t.pitch) fatal("xg: explicit Pitch %u not supported yet", t.pitch);
     if (t.tile_mode == kTileLinearGeneral) fatal("xg: linear-general tile mode not supported yet");
-    gcn::SurfaceDesc& d = c->planes[0].desc;
+    gcn::SurfaceDesc d;
     d.width = t.width;
     d.height = t.height;
     d.depth = t.depth;
@@ -125,34 +151,71 @@ HRESULT build(Computer* c, const TexDesc& t) {
     d.tile_index = t.tile_mode;
     d.is_3d = t.dim == 4;
     d.is_depth = fi.depth;
-    if (fi.depth && fi.stencil) {
-        // GCN keeps depth (32 bit for D24S8/D32S8) and stencil (8 bit) apart.
-        // STUB: plane order/usage values and the stencil tile mode are unverified.
-        FL_STUB_ONCE("xg: depth+stencil layouts (plane details unverified)");
-        d.bytes_per_element = 4;
-        c->num_planes = 2;
-        c->planes[1].desc = d;
-        c->planes[1].desc.bytes_per_element = 1;
-        c->planes[1].desc.is_depth = false;
-    }
-    for (int i = 0; i < c->num_planes; i++)
-        if (!gcn::compute_layout(c->planes[i].desc, &c->planes[i].layout)) return E_INVALIDARG;
+    // GCN keeps depth (32 bit for D24S8/D32S8) and stencil (8 bit) apart.
+    gcn::SurfaceDesc stencil = d;
+    stencil.bytes_per_element = 1;
+    stencil.is_depth = false;
+    if (fi.depth && fi.stencil) d.bytes_per_element = 4;
 
+    // The planes, as xg_x's 2D builder (rva 0x1770) picks them: a single-mip
+    // depth-stencil target gets [HTILE] DEPTH [STENCIL] (HTILE unless both
+    // compression-off misc bits are set); other two-plane formats get DEPTH
+    // STENCIL when bound as depth, else 5/6; everything else one plane.
+    struct Spec { uint32_t usage; bool surface; gcn::SurfaceDesc desc; };
+    Spec spec[3];
+    int n = 0;
+    bool single_mip = d.mips == 1;
+    bool depth_target = t.dim == 3 && single_mip && (t.bind & kBindDepthStencil) && !(t.bind & kBindRenderTarget);
+    if (depth_target) {
+        if (!(t.misc & kMiscNoDepthCompression) || !(t.misc & kMiscNoStencilCompression))
+            spec[n++] = {kUsageHtile, false, {}};
+        c->main_plane = n;
+        spec[n++] = {kUsageDepth, true, d};
+        if (fi.stencil) spec[n++] = {kUsageStencil, true, stencil};
+    } else if (fi.depth && fi.stencil) {
+        bool ds = (t.bind & kBindDepthStencil) != 0;
+        spec[n++] = {ds ? kUsageDepth : kUsageLuma, true, d};
+        spec[n++] = {ds ? kUsageStencil : kUsageChroma, true, stencil};
+    } else {
+        // STUB: xg_x also gives single-mip colour targets a CMASK plane (and
+        // FMASK with MSAA) after the colour plane; not modelled yet.
+        if (t.dim == 3 && single_mip && (t.bind & kBindRenderTarget))
+            FL_STUB_ONCE("xg: colour render target laid out without its CMASK/FMASK planes");
+        spec[n++] = {kUsageDefault, true, d};
+    }
+    c->num_planes = n;
+    for (int i = 0; i < n; i++) {
+        if (!spec[i].surface) continue;
+        c->planes[i].desc = spec[i].desc;
+        c->has_surface[i] = true;
+        if (!gcn::compute_layout(c->planes[i].desc, &c->planes[i].layout)) return E_INVALIDARG;
+    }
+
+    // Offsets as xg_x assigns them (rva 0x2600): a plane's base offset is the
+    // previous plane's end, and the running end is aligned to the plane's
+    // alignment before adding its size.
     ResourceLayout& L = c->layout;
     L.mip_levels = d.mips;
-    L.planes = c->num_planes;
-    uint64_t off = 0;
-    for (int i = 0; i < c->num_planes; i++) {
-        const gcn::Layout& pl = c->planes[i].layout;
-        off = (off + pl.align - 1) / pl.align * pl.align;
-        fill_plane(&L.plane[i], c->planes[i], i == 0 ? (fi.depth ? 2 : 1) : 3, off, t.tile_mode);
-        off += pl.size;
-        if (pl.align > L.base_alignment) L.base_alignment = pl.align;
+    L.planes = n;
+    uint64_t end = 0;
+    for (int i = 0; i < n; i++) {
+        PlaneLayout& p = L.plane[i];
+        if (spec[i].surface) {
+            fill_plane(&p, c->planes[i], spec[i].usage, end, t.tile_mode);
+        } else {  // HTILE, sized from the depth surface
+            const gcn::Layout& dl = c->planes[c->main_plane].layout;
+            p.usage = spec[i].usage;
+            p.size_bytes = htile_bytes(dl.mips[0].pitch, dl.mips[0].padded_height, d.array_size);
+            p.base_offset_bytes = end;
+            p.base_alignment = 0x800;
+        }
+        end = (end + p.base_alignment - 1) / p.base_alignment * p.base_alignment + p.size_bytes;
+        if (p.base_alignment > L.base_alignment) L.base_alignment = p.base_alignment;
     }
-    L.size_bytes = off;
-    FL_LOG(xg, "layout dim %u %ux%ux%u[%u] mips %u fmt %u tile %u -> size 0x%llx align 0x%llx", t.dim, t.width,
-           t.height, t.depth, t.array_size, d.mips, t.format, t.tile_mode, (unsigned long long)L.size_bytes,
-           (unsigned long long)L.base_alignment);
+    L.size_bytes = end;
+    FL_LOG(xg, "layout dim %u %ux%ux%u[%u] mips %u fmt %u tile %u bind 0x%x misc 0x%x -> %d planes, size 0x%llx align 0x%llx",
+           t.dim, t.width, t.height, t.depth, t.array_size, d.mips, t.format, t.tile_mode, t.bind, t.misc, n,
+           (unsigned long long)L.size_bytes, (unsigned long long)L.base_alignment);
     return S_OK;
 }
 
@@ -178,6 +241,10 @@ WINAPI uint64_t comp_GetMipLevelOffsetBytes(Computer* c, UINT plane, UINT mip) {
 WINAPI uint64_t comp_GetTexelElementOffsetBytes(Computer* c, UINT plane, UINT mip, uint64_t x, UINT y, UINT z,
                                                 UINT sample) {
     if (plane >= static_cast<UINT>(c->num_planes) || mip >= c->layout.mip_levels) return ~0ull;
+    if (!c->has_surface[plane]) {
+        FL_ERROR("XGTextureAddressComputer: texel offset asked for metadata plane %u (HTILE)", plane);
+        return ~0ull;
+    }
     const Plane& p = c->planes[plane];
     return c->layout.plane[plane].base_offset_bytes +
            gcn::element_offset(p.desc, p.layout, mip, static_cast<uint32_t>(x), y, z, sample);
@@ -213,11 +280,11 @@ HRESULT create_computer(const TexDesc& t, Computer** out) {
 // ---- descriptor parsing ----
 
 // XG_TEXTURE1D_DESC: W Mips Array Format Usage Bind CPU Misc ESRAM0 ESRAM1 TileMode Pitch
-TexDesc from_1d(const uint32_t* x) { return TexDesc{2, x[0], 1, 1, x[2], x[1], x[3], 1, x[10], x[11]}; }
+TexDesc from_1d(const uint32_t* x) { return TexDesc{2, x[0], 1, 1, x[2], x[1], x[3], 1, x[10], x[11], x[5], x[7]}; }
 // XG_TEXTURE2D_DESC: W H Mips Array Format Samples Quality Usage Bind CPU Misc ESRAM0 ESRAM1 TileMode Pitch
-TexDesc from_2d(const uint32_t* x) { return TexDesc{3, x[0], x[1], 1, x[3], x[2], x[4], x[5], x[13], x[14]}; }
+TexDesc from_2d(const uint32_t* x) { return TexDesc{3, x[0], x[1], 1, x[3], x[2], x[4], x[5], x[13], x[14], x[8], x[10]}; }
 // XG_TEXTURE3D_DESC: W H D Mips Format Usage Bind CPU Misc ESRAM0 ESRAM1 TileMode Pitch
-TexDesc from_3d(const uint32_t* x) { return TexDesc{4, x[0], x[1], x[2], 1, x[3], x[4], 1, x[11], x[12]}; }
+TexDesc from_3d(const uint32_t* x) { return TexDesc{4, x[0], x[1], x[2], 1, x[3], x[4], 1, x[11], x[12], x[6], x[8]}; }
 
 // ---- exports ----
 
@@ -277,8 +344,8 @@ UINT optimal_tile_mode(UINT dim, UINT format, UINT width, UINT height, UINT arra
 bool layout_for(const TexDesc& t, gcn::SurfaceDesc* d, gcn::Layout* l) {
     Computer* c = nullptr;
     if (create_computer(t, &c) < 0) return false;
-    *d = c->planes[0].desc;
-    *l = c->planes[0].layout;
+    *d = c->planes[c->main_plane].desc;
+    *l = c->planes[c->main_plane].layout;
     comp_Release(c);
     return true;
 }

@@ -24,11 +24,15 @@ struct AsyncOperation : Object {
     HRESULT error;
     void* handler = nullptr;
     uint32_t id;
+    bool pending = false;  // never completes (Started forever): see async_pending
 };
 
 // Common shortcuts. Each returns a new operation's interface pointer (owning).
 void* async_result_u32(const GUID& iid, uint32_t value);
 void* async_result_ptr(const GUID& iid, void* object);  // takes ownership of one reference
 void* async_failed(const GUID& iid, HRESULT error);
+// An operation that stays Started forever: its handler is stored, never called.
+// For requests a disconnected console would leave waiting.
+void* async_pending(const GUID& iid);
 
 }  // namespace fl::winrt

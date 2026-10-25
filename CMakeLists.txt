@@ -42,6 +42,14 @@ target_compile_options(addrlib PRIVATE -w -fexceptions)
 
 add_executable(forza-linux ${FL_SOURCES})
 target_include_directories(forza-linux PRIVATE src)
+# Developer-only shortcut: FL_SKIP_MOVIES=<name,...> makes the named Bink movies
+# "not found" so test boots skip the long intro. Must stay OFF in the repo and
+# in any build that is shared; enable it only in a local build directory.
+option(FL_DEV_SKIP_MOVIES "dev only: honour FL_SKIP_MOVIES (never in shared builds)" OFF)
+if(FL_DEV_SKIP_MOVIES)
+  message(WARNING "FL_DEV_SKIP_MOVIES is ON: developer build, do not share it")
+  target_compile_definitions(forza-linux PRIVATE FL_DEV_SKIP_MOVIES=1)
+endif()
 # dxvk-native (D3D11 + DXGI on Vulkan), built by tools/build_dxvk.sh.
 # Only the libraries are linked into forza-linux: DXVK's Windows headers clash
 # with src/common/winabi.h, so src/hle/d3d11x calls DXVK through raw vtables.

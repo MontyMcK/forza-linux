@@ -60,8 +60,10 @@ struct DeviceX;
 // Base of every wrapper the game can pass back to us as an ID3D11DeviceChild.
 struct DeviceChild : winrt::Object {
     static constexpr uint32_t kMagic = 0x43443344;  // "D3DC"
+    static constexpr uint32_t kDeadMagic = 0x44414544;  // "DEAD": released under FL_D3D_QUARANTINE
     DeviceChild(const char16_t* name, DeviceX* dev, winrt::Vtable& vt, void* dxvk_obj);
     ~DeviceChild() override;
+    void destroy() override;
 
     // The resource whose memory this object reads (resources: themselves,
     // views: their resource), for placement-memory syncing.
@@ -96,6 +98,7 @@ struct Resource : DeviceChild {
     // Placement resources (device slots 62-65) live in game memory.
     uint8_t* place = nullptr;
     size_t place_size = 0;     // bytes of game memory the resource covers (0 = unknown)
+    uint64_t upload_hash = 0;  // FL_CHECK_TRACKING: hash of the last upload
     uint32_t tile_mode = 0;    // index into the GCN tile mode table (textures)
     uint32_t pitch = 0;        // in elements, 0 = default
     bool gpu_owned = false;    // render target / depth / UAV: the GPU writes it, never upload

@@ -15,6 +15,7 @@
 
 #include "common/log.h"
 #include "common/png.h"
+#include "hle/d3d11x/trace.h"
 #include "hle/d3d11x/d3d11x.h"
 #include "hle/d3d11x/dxvk.h"
 #include "hle/registry.h"
@@ -236,6 +237,7 @@ WINAPI HRESULT sc_Present(Iface* self, UINT sync, UINT flags) {
     sc->frame++;
     if (sc->frame == 1) log_write("d3d", "first Present (sync %u flags 0x%x)", sync, flags);
     if (shots.count(sc->frame)) screenshot(sc);
+    trace::on_present(sc->frame + 1);
     HRESULT hr = dx<HRESULT>(sc->dxvk, desktop::swapchain::Present, sync, flags & 0xff);
     if (exit_after && sc->frame >= exit_after) {
         log_write("d3d", "FL_EXIT_AFTER_FRAME=%llu reached", (unsigned long long)exit_after);

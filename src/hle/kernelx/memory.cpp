@@ -51,6 +51,7 @@ WINAPI void* kx_VirtualAlloc(void* addr, SIZE_T size, DWORD type, DWORD protect)
     if (addr && !(type & MEM_RESERVE)) {
         // Commit inside an existing reservation.
         auto base = reinterpret_cast<uint64_t>(addr) & ~uint64_t(0xFFF);
+        FL_LOG(memory, "VirtualAlloc commit %p+0x%llx type 0x%x prot 0x%x", addr, (unsigned long long)size, type, protect);
         if (mprotect(reinterpret_cast<void*>(base), size, prot) != 0) {
             set_last_error(ERROR_INVALID_PARAMETER);
             return nullptr;
@@ -86,12 +87,14 @@ WINAPI BOOL kx_VirtualFree(void* addr, SIZE_T size, DWORD type) {
     if (type & MEM_RELEASE) {
         auto it = g_regions.find(base);
         if (it == g_regions.end()) return set_last_error(ERROR_INVALID_PARAMETER), FALSE_;
+        FL_LOG(memory, "VirtualFree release %p+0x%llx", addr, (unsigned long long)it->second);
         munmap(addr, it->second);
         g_regions.erase(it);
         return TRUE_;
     }
     if (type & MEM_DECOMMIT) {
         size = (size + 0xFFF) & ~SIZE_T(0xFFF);
+        FL_LOG(memory, "VirtualFree decommit %p+0x%llx", addr, (unsigned long long)size);
         mmap(addr, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_NORESERVE, -1, 0);
         return TRUE_;
     }
@@ -108,6 +111,7 @@ WINAPI HANDLE kx_GetProcessHeap() { return kProcessHeap; }
 WINAPI void* kx_HeapAlloc(HANDLE heap, DWORD flags, SIZE_T size) {
     void* p = (flags & HEAP_ZERO_MEMORY) ? calloc(1, size ? size : 1) : malloc(size ? size : 1);
     if (!p) set_last_error(ERROR_NOT_ENOUGH_MEMORY);
+    if (size >= 0x10000) FL_LOG(memory, "HeapAlloc(0x%llx) -> %p", (unsigned long long)size, p);
     return p;
 }
 
@@ -127,17 +131,52 @@ using XMemFreeFn = void(WINAPI*)(void* p, uint64_t attributes);
 XMemAllocFn g_alloc_hook = nullptr;
 XMemFreeFn g_free_hook = nullptr;
 
+// Title memory gets its own page-rounded mappings, never the C heap: the game
+// places GPU resources in it (CreatePlacement*), and the D3D layer write-protects
+// those pages to see CPU writes (d3d11x/gpumem.h). On shared heap pages that
+// protection also covered malloc metadata and DXVK/RADV objects, and kernel
+// writes into them (ioctl results) failed with EFAULT: DXVK then crashed at
+// random (2026-10-25). Azimuth likewise keeps title memory in its own mappings.
+std::mutex g_xmem_mutex;
+std::map<uintptr_t, size_t> g_xmem;  // base -> mapped length
+
 WINAPI void* kx_XMemAllocDefault(SIZE_T size, uint64_t attributes) {
-    size_t align = size >= 0x10000 ? 0x10000 : (size >= 0x1000 ? 0x1000 : 64);
-    void* p = nullptr;
-    if (posix_memalign(&p, align, size ? size : 1) != 0) return nullptr;
-    memset(p, 0, size);
+    constexpr size_t kPage = 0x1000;
+    size_t align = size >= 0x10000 ? 0x10000 : kPage;
+    size_t len = ((size ? size : 1) + kPage - 1) & ~(kPage - 1);
+    size_t span = len + (align > kPage ? align : 0);
+    auto* raw = static_cast<uint8_t*>(mmap(nullptr, span, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    if (raw == MAP_FAILED) {
+        FL_ERROR("XMemAllocDefault(0x%llx): mmap failed", (unsigned long long)size);
+        return nullptr;
+    }
+    auto base = (reinterpret_cast<uintptr_t>(raw) + align - 1) & ~(align - 1);
+    if (size_t head = base - reinterpret_cast<uintptr_t>(raw)) munmap(raw, head);
+    if (size_t tail = reinterpret_cast<uintptr_t>(raw) + span - (base + len)) munmap(reinterpret_cast<void*>(base + len), tail);
+    {
+        std::lock_guard lock(g_xmem_mutex);
+        g_xmem[base] = len;
+    }
     FL_LOG(memory, "XMemAllocDefault(0x%llx, attr 0x%llx) -> %p", (unsigned long long)size,
-           (unsigned long long)attributes, p);
-    return p;
+           (unsigned long long)attributes, reinterpret_cast<void*>(base));
+    return reinterpret_cast<void*>(base);  // mmap memory is already zero
 }
 
-WINAPI void kx_XMemFreeDefault(void* p, uint64_t attributes) { free(p); }
+WINAPI void kx_XMemFreeDefault(void* p, uint64_t attributes) {
+    if (!p) return;
+    size_t len = 0;
+    {
+        std::lock_guard lock(g_xmem_mutex);
+        auto it = g_xmem.find(reinterpret_cast<uintptr_t>(p));
+        if (it == g_xmem.end()) {
+            FL_ERROR("XMemFreeDefault(%p): not a block XMemAllocDefault returned", p);
+            return;
+        }
+        len = it->second;
+        g_xmem.erase(it);
+    }
+    munmap(p, len);
+}
 
 WINAPI void* kx_XMemAlloc(SIZE_T size, uint64_t attributes) {
     return g_alloc_hook ? g_alloc_hook(size, attributes) : kx_XMemAllocDefault(size, attributes);

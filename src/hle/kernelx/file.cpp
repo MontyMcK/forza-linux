@@ -5,6 +5,8 @@
 // ERROR_IO_PENDING. Correct, but blocks the caller: make it async if loading
 // becomes a bottleneck.
 
+#include <vector>
+#include <algorithm>
 #include <cerrno>
 #include <condition_variable>
 #include <cstring>
@@ -106,7 +108,41 @@ DWORD attrs_of(const struct stat& st) {
 
 // ---------------------------------------------------------------- open/close
 
+#ifdef FL_DEV_SKIP_MOVIES
+// Developer builds only (CMake -DFL_DEV_SKIP_MOVIES=ON, off by default):
+// FL_SKIP_MOVIES=name[,name...]: opening a .bk2 movie whose
+// path contains one of the names (case-insensitive) fails with "file not
+// found", so the game skips it (e.g. the long Anthem_Tone_Video after the
+// title). "all" skips every movie.
+bool skip_movie(const std::string& win) {
+    static const char* env = getenv("FL_SKIP_MOVIES");
+    if (!env || !*env) return false;
+    auto lower = [](std::string s) {
+        for (char& c : s) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+    std::string path = lower(win);
+    if (path.size() < 4 || path.compare(path.size() - 4, 4, ".bk2") != 0) return false;
+    std::string list = lower(env);
+    for (size_t pos = 0; pos <= list.size();) {
+        size_t comma = list.find(',', pos);
+        std::string name = list.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+        if (name == "all" || (!name.empty() && path.find(name) != std::string::npos)) return true;
+        if (comma == std::string::npos) break;
+        pos = comma + 1;
+    }
+    return false;
+}
+#endif
+
 HANDLE open_file(const std::string& win, DWORD access, DWORD disposition, DWORD flags) {
+#ifdef FL_DEV_SKIP_MOVIES
+    if (skip_movie(win)) {
+        ::fl::log_write("file", "skipping movie '%s' (FL_SKIP_MOVIES, developer build)", win.c_str());
+        set_last_error(ERROR_FILE_NOT_FOUND);
+        return INVALID_HANDLE_VALUE;
+    }
+#endif
     bool write = access & (GENERIC_WRITE | 0x2 /* FILE_WRITE_DATA */ | 0x4 /* FILE_APPEND_DATA */);
     std::string host = vfs::to_host(win, disposition != OPEN_EXISTING && disposition != TRUNCATE_EXISTING);
     if (write && host.rfind(config().game_dir, 0) == 0)
@@ -184,9 +220,6 @@ BOOL do_io(HANDLE h, void* buf, DWORD n, DWORD* done, Overlapped* ov, bool is_wr
     auto f = get_file(h);
     if (!f) return set_last_error(ERROR_INVALID_HANDLE), FALSE_;
     if (done) *done = 0;
-    // The game reads straight into GPU memory (texture streaming); the kernel
-    // can't write into pages we write-protected for change tracking.
-    if (!is_write) d3d::gpumem::prepare_write(buf, n);
     if (ov) {
         off_t off = (static_cast<off_t>(ov->OffsetHigh) << 32) | ov->Offset;
         ssize_t r = is_write ? pwrite(f->fd, buf, n, off) : pread(f->fd, buf, n, off);

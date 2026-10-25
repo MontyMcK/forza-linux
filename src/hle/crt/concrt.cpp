@@ -395,8 +395,12 @@ WINAPI int col_run_and_wait(TaskCollection* c, void* chore) {
 
 WINAPI void col_cancel(TaskCollection* c) { c->canceled = true; }
 
-[[noreturn]] WINAPI void report_unobserved_exception() {
-    fl::fatal("ConcRT: a PPL task's exception was never observed (_ReportUnobservedException)");
+// The real msvcr110 calls the registered handler, then __fastfail(5). Offline,
+// Xbox Live tasks the game drops without get() fail, which a connected console
+// never sees; like the Azimuth reference we report it and carry on.
+WINAPI void report_unobserved_exception() {
+    FL_ERROR("ConcRT: a PPL task's exception was never observed (called from %p); continuing",
+             __builtin_return_address(0));
 }
 
 WINAPI void cc_wait(unsigned ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }

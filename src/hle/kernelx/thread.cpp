@@ -436,3 +436,7 @@ HLE_EXPORT(kernelx, SwitchToFiber, kx_SwitchToFiber);
 HLE_EXPORT(kernelx, DeleteFiber, kx_DeleteFiber);
 
 }  // namespace fl::kx
+
+namespace fl::kx {
+uint64_t process_affinity_mask() { return kAffinityMask; }
+}  // namespace fl::kx

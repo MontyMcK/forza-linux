@@ -174,15 +174,18 @@ struct AudioClient : Object {
         c->staging.resize(static_cast<size_t>(c->buffer_frames) * c->block);
         c->initialized = true;
         c->open_backend(fmt);
-        fl::log_write("audio", "IAudioClient::Initialize: %u Hz, %u ch, %u bits, tag 0x%x, buffer %u frames, flags 0x%x%s",
+        fl::log_write("audio", "IAudioClient::Initialize: %u Hz, %u ch, %u bits, tag 0x%x, buffer %u frames, flags 0x%x%s"
+                      " (asked duration %lld period %lld, share %d)",
                       fmt->nSamplesPerSec, fmt->nChannels, fmt->wBitsPerSample, fmt->wFormatTag, c->buffer_frames,
-                      flags, (flags & AUDCLNT_STREAMFLAGS_EVENTCALLBACK) ? " (event driven)" : "");
+                      flags, (flags & AUDCLNT_STREAMFLAGS_EVENTCALLBACK) ? " (event driven)" : "", (long long)duration,
+                      (long long)period, share);
         if (!c->device.joinable()) c->device = std::thread([c] { c->device_loop(); });
         return S_OK;
     }
     static WINAPI HRESULT GetBufferSize(Iface* i, uint32_t* out) {
         if (!self(i)->initialized) return AUDCLNT_E_NOT_INITIALIZED;
         *out = self(i)->buffer_frames;
+        FL_LOG(audio, "IAudioClient::GetBufferSize -> %u", *out);
         return S_OK;
     }
     static WINAPI HRESULT GetStreamLatency(Iface*, int64_t* out) {
@@ -209,6 +212,7 @@ struct AudioClient : Object {
         return S_FALSE;
     }
     static WINAPI HRESULT GetMixFormat(Iface*, WaveFormatEx** out) {
+        FL_LOG(audio, "IAudioClient::GetMixFormat");
         auto* f = static_cast<WaveFormatExtensible*>(co_task_alloc(sizeof(WaveFormatExtensible)));
         *f = mix_format();
         *out = &f->Format;
@@ -217,6 +221,7 @@ struct AudioClient : Object {
     static WINAPI HRESULT GetDevicePeriod(Iface*, int64_t* def, int64_t* min) {
         if (def) *def = 100000;  // 10 ms
         if (min) *min = 30000;   // 3 ms
+        FL_LOG(audio, "IAudioClient::GetDevicePeriod");
         return S_OK;
     }
     static WINAPI HRESULT Start(Iface* i) {
@@ -239,11 +244,13 @@ struct AudioClient : Object {
         return S_OK;
     }
     static WINAPI HRESULT SetEventHandle(Iface* i, HANDLE ev) {
+        FL_LOG(audio, "IAudioClient::SetEventHandle(%p)", ev);
         self(i)->event = ev;
         return S_OK;
     }
     static WINAPI HRESULT GetService(Iface* i, const GUID& iid, void** out) {
         HRESULT hr = self(i)->query(iid, out);
+        FL_LOG(audio, "IAudioClient::GetService(%s) -> 0x%x", winrt::guid_str(iid).c_str(), static_cast<unsigned>(hr));
         if (hr < 0) FL_ERROR("IAudioClient::GetService(%s): not supported", winrt::guid_str(iid).c_str());
         return hr;
     }
@@ -251,6 +258,8 @@ struct AudioClient : Object {
     // IAudioRenderClient
     static WINAPI HRESULT GetBuffer(Iface* i, uint32_t frames, uint8_t** data) {
         AudioClient* c = self(i);
+        static std::atomic<uint64_t> calls{0};
+        if ((calls++ % 500) == 0) FL_LOG(audio, "IAudioRenderClient::GetBuffer(%u) call %llu", frames, (unsigned long long)calls.load());
         std::lock_guard lock(c->m);
         c->update_padding();
         if (frames + c->padding > c->buffer_frames) return AUDCLNT_E_BUFFER_TOO_LARGE;
@@ -472,10 +481,25 @@ WINAPI HRESULT ActivateAudioInterfaceAsync_(const char16_t* path, const GUID& ii
     return S_OK;
 }
 
-// STUB: thread affinity is left to the Linux scheduler.
-WINAPI HRESULT SetWasapiThreadAffinityMask_(uint64_t mask) {
-    FL_STUB_ONCE("SetWasapiThreadAffinityMask: ignored");
-    return S_OK;
+// Like SetThreadAffinityMask it returns the PREVIOUS mask (the process mask
+// the first time), 0 + ERROR_INVALID_PARAMETER if the mask is outside the
+// process's (reference MMDevAPI.dll rva 0x81f0). FMOD treats 0 as failure: our
+// old `return S_OK` made its WASAPI output init fail and the game fell back to
+// its silent AudioEngineCommon, whose slot 84 returns null and crashes the
+// world load (FINDINGS §4). STUB: the mask itself is left to the scheduler.
+WINAPI uint64_t SetWasapiThreadAffinityMask_(uint64_t mask) {
+    uint64_t process = kx::process_affinity_mask();
+    // FL_NO_FMOD=1 (diagnostic): fail like the old stub, so FMOD's output init
+    // fails and the game runs its silent AudioEngineCommon.
+    if (getenv("FL_NO_FMOD")) return 0;
+    if (mask & ~process) {
+        kx::set_last_error(87);
+        return 0;
+    }
+    static std::atomic<uint64_t> current{0};
+    uint64_t prev = current.exchange(mask);
+    FL_STUB_ONCE("SetWasapiThreadAffinityMask: mask recorded, not applied");
+    return prev ? prev : process;
 }
 
 }  // namespace

@@ -3,8 +3,11 @@
 //
 // Object layout follows vccorlib110 (reference, FINDINGS §5b): allocated as
 // 0x98 bytes, object at +0x10, four interface pointers at +0x00/+0x08/+0x10/+0x18,
-// HRESULT at +0x40, refcount at +0x60. The +0x10 interface's slot 9 returns the
-// HRESULT. Other methods (message strings) trap until something uses them.
+// a WINRTEXCEPTIONINFO at +0x20 (HRESULT +0x40, ThrowInfo +0x50, size +0x58 =
+// 0x40) that the word just before the object points to, refcount at +0x60. The
+// ThrowInfo is the exception's dynamic type: _CxxThrowException uses it when a
+// hat is thrown through a static type (cxx_eh.cpp). The +0x10 interface's slot 9
+// returns the HRESULT. Other methods (message strings) trap until something uses them.
 //
 // Catch matching compares type names, so our ThrowInfo uses the C++/CX
 // decorated names (".PE$AAVException@Platform@@" ...). ThrowInfo/TypeDescriptor
@@ -35,7 +38,7 @@ namespace {
 // ---- exception objects ----
 
 constexpr size_t kAllocSize = 0x98, kHeader = 0x10;
-constexpr size_t kHResult = 0x40, kRefs = 0x60, kOwned = 0x74;
+constexpr size_t kInfo = 0x20, kHResult = 0x40, kThrowInfo = 0x50, kInfoSize = 0x58, kRefs = 0x60, kOwned = 0x74;
 
 uint8_t* obj_of(void* iface, size_t off) { return static_cast<uint8_t*>(iface) - off; }
 HRESULT& hr_of(uint8_t* o) { return *reinterpret_cast<HRESULT*>(o + kHResult); }
@@ -95,7 +98,11 @@ void** make_vtable(int slots, const char* name) {
     return t;
 }
 
-void init_exception(void* obj, HRESULT hr, bool owned) {
+void* throw_info_for(const char* cls);
+const char* class_for(HRESULT hr);
+
+// cls: the Platform exception class this object is (null: COMException).
+void init_exception(void* obj, HRESULT hr, bool owned, const char* cls) {
     static void** vt0 = make_vtable<0x00>(6, "Platform::Exception@+0");
     static void** vt8 = make_vtable<0x08>(8, "Platform::Exception@+8");
     static void** vt10 = [] {
@@ -110,14 +117,17 @@ void init_exception(void* obj, HRESULT hr, bool owned) {
     reinterpret_cast<void***>(o)[1] = vt8;
     reinterpret_cast<void***>(o)[2] = vt10;
     reinterpret_cast<void***>(o)[3] = vt18;
+    reinterpret_cast<uint8_t**>(o)[-1] = o + kInfo;  // vccorlib: the info pointer precedes the object
     hr_of(o) = hr;
+    *reinterpret_cast<void**>(o + kThrowInfo) = throw_info_for(cls);
+    *reinterpret_cast<uint32_t*>(o + kInfoSize) = 0x40;
     refs_of(o) = 1;
     o[kOwned] = owned;
 }
 
 void* new_exception(HRESULT hr) {
     auto* mem = static_cast<uint8_t*>(calloc(1, kAllocSize));
-    init_exception(mem + kHeader, hr, true);
+    init_exception(mem + kHeader, hr, true, class_for(hr));
     return mem + kHeader;
 }
 
@@ -222,8 +232,9 @@ void* throw_info_for(const char* cls) {
 WINAPI void* v_CreateException(HRESULT hr) { return new_exception(hr); }
 WINAPI HRESULT v_ReCreateFromException(void* e) { return e ? hr_of(static_cast<uint8_t*>(e)) : S_OK; }
 
+// The game allocates these with Heap::AllocateException (header included).
 #define FL_EX_CTOR(fn, hr) \
-    WINAPI void* fn(void* self) { return init_exception(self, static_cast<HRESULT>(hr), false), self; }
+    WINAPI void* fn(void* self) { return init_exception(self, static_cast<HRESULT>(hr), false, class_for(hr)), self; }
 FL_EX_CTOR(v_ChangedStateCtor, 0x8000000C)
 FL_EX_CTOR(v_DisconnectedCtor, 0x80010108)
 FL_EX_CTOR(v_FailureCtor, 0x80004005)
@@ -233,7 +244,8 @@ FL_EX_CTOR(v_OutOfBoundsCtor, 0x8000000B)
 FL_EX_CTOR(v_OutOfMemoryCtor, 0x8007000E)
 FL_EX_CTOR(v_NullReferenceCtor, 0x80004003)
 #undef FL_EX_CTOR
-WINAPI void* v_COMExceptionCtor(void* self, HRESULT hr) { return init_exception(self, hr, false), self; }
+// COMException(hr) is a COMException whatever the HRESULT (vccorlib110 0x18470).
+WINAPI void* v_COMExceptionCtor(void* self, HRESULT hr) { return init_exception(self, hr, false, nullptr), self; }
 
 // Exception::Message: vccorlib FormatMessage()s the HRESULT; we have no
 // system message table, so the text names the exception class and code.

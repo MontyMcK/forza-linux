@@ -33,8 +33,15 @@ WINAPI void v_UninitializeData(int x) {}
 // Ref-class object storage.
 WINAPI void* v_HeapAllocate(size_t n) { return calloc(1, n ? n : 1); }
 WINAPI void v_HeapFree(void* p) { free(p); }
-WINAPI void* v_HeapAllocateException(size_t n) { return calloc(1, n ? n : 1); }
-WINAPI void v_HeapFreeException(void* p) { free(p); }
+// Exceptions get a 0x10-byte header (vccorlib110 0x1aa4c): the word before
+// the object points to its WINRTEXCEPTIONINFO (exceptions.cpp).
+WINAPI void* v_HeapAllocateException(size_t n) {
+    FL_LOG(seh, "Heap::AllocateException(0x%zx)", n);
+    return static_cast<uint8_t*>(calloc(1, n + 0x10)) + 0x10;
+}
+WINAPI void v_HeapFreeException(void* p) {
+    if (p) free(static_cast<uint8_t*>(p) - 0x10);
+}
 
 // Platform::Object::Object(): the base constructor has no state of its own.
 WINAPI void* v_ObjectCtor(void* self) { return self; }

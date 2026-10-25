@@ -70,6 +70,7 @@ void* game_main_thread(void*) {
     loader::attach_thread(stack_lo, static_cast<uint8_t*>(stack_lo) + stack_size, /*main_thread=*/true);
     auto& img = loader::main_image();
     auto entry = reinterpret_cast<EntryPoint>(img.base + img.entry_rva);
+    loader::arm_breakpoints();
     log_write("loader", "jumping to game entry point %p", reinterpret_cast<void*>(entry));
     int rc = entry();
     log_write("loader", "game entry point returned %d", rc);

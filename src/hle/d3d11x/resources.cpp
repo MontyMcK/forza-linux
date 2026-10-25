@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "common/log.h"
+#include "hle/d3d11x/trace.h"
 #include "hle/d3d11x/d3d11x.h"
 #include "hle/d3d11x/dxvk.h"
 
@@ -121,6 +122,15 @@ HRESULT create_resource(DeviceX* dev, int dim, const uint32_t* xd, const void* i
         return hr;
     }
     auto* r = new Resource(di.name, dev, di.vt(), obj, dim, xd, di.xbox_size);
+    // MipLevels 0 asks for the full chain; GetDesc must then report the real
+    // count (the game sizes its per-mip view arrays from it, e.g. the
+    // reflection pyramid at game rva 0x10d8bb0). Desktop texture GetDesc = slot 10.
+    if (int mip_index = dim == 2 ? 1 : dim == 3 ? 2 : dim == 4 ? 3 : -1;
+        mip_index >= 0 && reinterpret_cast<uint32_t*>(r->xdesc)[mip_index] == 0) {
+        uint32_t d[12] = {};
+        dx<void>(obj, 10, d);
+        reinterpret_cast<uint32_t*>(r->xdesc)[mip_index] = d[mip_index];
+    }
     r->expose(*di.iid, &r->iface);
     *out = &r->iface;
     if (created) *created = r;
@@ -186,11 +196,36 @@ HRESULT create_view(Iface* self, int desktop_slot, const void* res, const void* 
     if (!r) return E_INVALIDARG;
     void* obj = nullptr;
     HRESULT hr = dx<HRESULT>(dev_of(self)->dxvk, desktop_slot, r->dxvk, desc, out ? &obj : nullptr);
+    Resource* rr = r->backing();
+    if (hr < 0 && desktop_slot == dd::CreateShaderResourceView && desc && rr && rr->dim == 3 && out) {
+        // The console reinterprets a texture's memory in any view format (e.g.
+        // R8_UINT over an R11G11B10_FLOAT target at startup); D3D11 forbids
+        // views across format families. STUB: such a view reads a zeroed
+        // stand-in texture of the view's format, so the game's setup that
+        // creates it completes instead of half-failing.
+        const uint32_t* vd = static_cast<const uint32_t*>(desc);
+        uint32_t td[11];
+        memcpy(td, rr->desc32(), sizeof td);
+        td[2] = 1, td[3] = 1, td[4] = vd[0], td[5] = 1, td[6] = 0, td[7] = 0, td[8] = 0x8, td[9] = 0, td[10] = 0;
+        void* stand_in = nullptr;
+        if (dx<HRESULT>(dev_of(self)->dxvk, dd::CreateTexture2D, td, nullptr, &stand_in) >= 0) {
+            uint32_t vd2[6] = {vd[0], vd[1], 0, 1, 0, 0};
+            hr = dx<HRESULT>(dev_of(self)->dxvk, desktop_slot, stand_in, vd2, &obj);
+            dx_release(stand_in);
+            if (hr >= 0) {
+                log_once("STUB: cross-format SRV backed by a zeroed stand-in texture, view format", vd[0]);
+                auto* v = new View(name, dev_of(self), vt, obj, r, kDesktopViewGetDesc);
+                v->expose(iid, &v->iface);
+                *out = &v->iface;
+                return hr;
+            }
+        }
+    }
     if (hr < 0) {
         const uint32_t* dw = static_cast<const uint32_t*>(desc);
         if (dw)
-            FL_ERROR("d3d: %s(fmt=%u dim=%u %u %u %u %u) failed: 0x%08x", what, dw[0], dw[1], dw[2], dw[3], dw[4],
-                     dw[5], static_cast<uint32_t>(hr));
+            FL_ERROR("d3d: %s(fmt=%u dim=%u %u %u %u %u) of [%s] failed: 0x%08x", what, dw[0], dw[1], dw[2], dw[3],
+                     dw[4], dw[5], trace::describe_dxvk(r->dxvk), static_cast<uint32_t>(hr));
         else
             FL_ERROR("d3d: %s(no desc) failed: 0x%08x", what, static_cast<uint32_t>(hr));
     }
@@ -201,6 +236,11 @@ HRESULT create_view(Iface* self, int desktop_slot, const void* res, const void* 
     auto* v = new View(name, dev_of(self), vt, obj, r, kDesktopViewGetDesc);
     v->expose(iid, &v->iface);
     *out = &v->iface;
+    if (log_enabled("view")) {
+        const uint32_t* dw = static_cast<const uint32_t*>(desc);
+        log_write("view", "%s(fmt %u dim %u %u %u) of [%s] -> %p", what, dw ? dw[0] : 0, dw ? dw[1] : 0, dw ? dw[2] : 0,
+                  dw ? dw[3] : 0, trace::describe_dxvk(r->dxvk), *out);
+    }
     return hr;
 }
 

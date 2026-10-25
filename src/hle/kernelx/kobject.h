@@ -69,5 +69,7 @@ HANDLE spawn_game_thread(void (*fn)(void*), void* arg);
 
 // Set the Windows last-error value of the calling game thread.
 void set_last_error(DWORD e);
+// The affinity mask GetProcessAffinityMask reports (the title's cores).
+uint64_t process_affinity_mask();
 
 }  // namespace fl::kx

@@ -3,13 +3,14 @@
 // On Xbox the CPU and GPU share memory: the game writes vertex/constant data
 // and streams textures straight into memory it placed resources over. DXVK's
 // resources live in their own memory, so we copy game memory to them, and only
-// when it changed. To know what changed, uploaded pages are write-protected;
-// the first write to a page faults, the fault hook marks it dirty and makes it
-// writable again.
+// when it changed.
 //
-// Code of ours that writes into game memory through the KERNEL (read(), recv()
-// ...) must call prepare_write() first: a syscall into a protected page fails
-// with EFAULT instead of faulting.
+// Changes are found the way Windows' GetWriteWatch finds them (Azimuth uses
+// that, FINDINGS §6): userfaultfd write-protection in async mode. The kernel
+// records the first write to each protected page itself (no fault reaches us,
+// and kernel writes such as read() into the page work), PAGEMAP_SCAN reports
+// written pages and re-protects them. Replaced an mprotect + SIGSEGV scheme
+// that broke kernel writes and raced between threads (2026-10-25).
 #pragma once
 
 #include <cstddef>
@@ -17,20 +18,25 @@
 
 namespace fl::d3d::gpumem {
 
-void init();  // installs the fault hook
+void init();
 
-// Start tracking a range (page granular). All its pages start dirty.
+// Start tracking a range (page granular). It starts out dirty.
 void track(const void* addr, size_t size);
 
-// True if any page of the range was written since it was last cleaned.
+// True if any page of the range was written since it was last uploaded (or
+// was never uploaded, or the game remapped it).
 bool dirty(const void* addr, size_t size);
 
-// Call right BEFORE copying the range to the GPU: protects it and clears the
-// dirty bits of pages that stay protected. Writes that race with the copy
-// re-mark their page dirty, so nothing is lost.
-void begin_upload(const void* addr, size_t size);
+// False if any page of the range is unmapped (the game released it).
+bool mapped(const void* addr, size_t size);
 
-// See the header comment. Safe on untracked memory (does nothing).
-void prepare_write(void* addr, size_t size);
+// False if any page of the range cannot be read: unmapped, or reserved but
+// not committed (the game commits a streamed texture's small mips first and
+// clamps its LOD until the big ones arrive).
+bool readable(const void* addr, size_t size);
+
+// Call right BEFORE copying the range to the GPU: re-arms tracking. Writes
+// that race with the copy mark their page written again, so nothing is lost.
+void begin_upload(const void* addr, size_t size);
 
 }  // namespace fl::d3d::gpumem

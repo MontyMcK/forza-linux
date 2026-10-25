@@ -104,3 +104,67 @@ Broken / open questions:
 - See PLAN Phase 5 open items.
 
 Next step: implement the simple missing imports first (CRT/kernelx/combase), then Platform::Details::GetActivationFactory (RE how the DLL's DllGetActivationFactory calls it), then C++/CX exceptions and PPL.
+
+## 2026-10-25: Claude Opus 5.5: iostreams, audio stack, title screen, input, saves, public repo, Azimuth reference
+
+Did:
+- msvcp110 iostreams/locale (src/hle/crt/msvcp_iostream.cpp, msvcp_locale.cpp, msvcp_ios.h; FINDINGS §4e).
+- Audio: AcpHal heaps/SHAPE contexts/IAcpHal queues (src/hle/acphal), WASAPI via ActivateAudioInterfaceAsync + IAudioClient2 on SDL3 (src/hle/audio/wasapi.cpp), MediaDevice (src/hle/winrt/media_devices.cpp). FMOD runs; XMA voices are silent (flowgraphs acknowledged, not executed).
+- D3D: Xbox-only context slots 151–155/160–177/197/214; **the Xbox draw ABI fix** (packed 64-bit arguments, FINDINGS §3.1): the title screen now renders correctly (Bink video, logo, A glyph). Copy sources sync placement memory like binds. Frame tracer + texture dumps (src/hle/d3d11x/trace.*).
+- vccorlib: Object::Equals, ToString family, Type, GetObjectContext, TerminateModule, NullReferenceException, Exception::Message, FailFast. PPL tasks: cancellation tokens and task collections on the ConcRT pool (concrt.cpp, FINDINGS §5a); native catch-all boundary `seh::guarded_call` for chores.
+- Input confirmed with the user's DualSense; `FL_AUTOPRESS` for unattended tests; `FL_LOG=input` logs button changes.
+- ConnectedStorage on local files with atomic commits + Windows.Storage.Streams.Buffer (src/hle/winrt/connected_storage.cpp, FINDINGS §4f). The game creates its profile on first A press.
+- User::GetTokenAndSignatureAsync answers "offline" (0x800704CF), like Azimuth.
+- Crash reports: game backtraces for unhandled exceptions; dladdr names for native crashes. `FL_LOG=missing` lists every unimplemented import (30 left, list in research/private/missing_all.txt).
+- Public repo https://github.com/MontyMcK/forza-linux (one commit; repo-local no-reply identity; no LICENSE yet: ask the user).
+- Azimuth (proprietary launcher, user-supplied) is studied as a reference (CLAUDE.md Rule 1): Ghidra 12.2 headless, projects and `tools/ghidra/DecompileRefs.java`. Useful already: the D3D11.X slot-name table, ContainerInfo layout, GetAsync error code, the offline token answer, NetworkInformation answer.
+
+Works: boot → intros → title screen with video and UI; DualSense; saves; audio output path.
+
+Broken / open:
+- **Blocker:** after A, the game's job at rva 0x1839500 waits on a sessiondirectory.xboxlive.com query with an unguarded `task.get()`; offline the query fails and the rethrow is unhandled (FINDINGS §4g). The job has an offline check: if `0x327270()->vfn 0x48 → vfn 0xb0 → vfn 0x128` is null it skips the query (sets 0x4cd).
+- An intermittent native SIGSEGV around 31 s (once; next report will name the library).
+- The game's Ghidra project was re-run with a 24 GB heap (the 2 GB default ran out of memory); check `research/private/game_ghidra_import.log` for "REPORT: Save succeeded".
+
+Next step: with the game's Ghidra project, run `DecompileRefs.java` on `addr:0x1839500`, `addr:0x327270`, `callers:0x183bed0` (see the header of tools/ghidra/DecompileRefs.java for the command; the program name is `forza_durango_release_final.exe`, project `research/private/game_ghidra/fh2`). Identify the object behind vfn 0x48/0xb0/0x128 (probably the game's Xbox Live/online-session wrapper) and what makes it null on an offline console; then make our runtime produce that state (likely a WinRT answer we get wrong). Check Azimuth's answers for the same calls if stuck.
+
+## 2026-10-25 (later): Claude: past the A press into world loading; why Azimuth runs and we don't
+
+Did:
+- Hang after A was the session-directory "pending" experiment. Real cause of the original crash: our C++/CX throws used the static type, so the game's `catch (COMException^)` in a task-based continuation never matched (FINDINGS §4g, §5a). Fixed in vccorlib (WINRTEXCEPTIONINFO before the object) and `_CxxThrowException` (TI_IsWinRT). Experiment removed; offline token requests all fail like Azimuth.
+- Hang dump: `FL_DUMP_THREADS_AT=<s>[,<s>]` (every thread's native symbol + game frames), `FL_CRASH_DUMP_THREADS=1`, `FL_CRASH_PEEK=[@]<rva>:<off>` (game globals in crash reports), crash reports now name the fault address's mapping and why the gpumem hook declined.
+- DXVK/RADV crash at ~31.7 s: heap corruption. The game overran its 3D colour LUT because XG reported a whole-level slice size (gcn.cpp fixed); the overrun hit the C heap shared with DXVK because XMemAllocDefault used posix_memalign (now dedicated mmaps). Also the immediate context is used from two threads (DXVK ID3D10Multithread lock on).
+- gpumem: kernel reads into tracked memory go through a bounce buffer (EFAULT race), protection changes are serialized with a spinlock, kernelx commit/decommit/release keep the tracker in sync, released memory is forgotten and re-tracked on reuse.
+- Audio: `SetWasapiThreadAffinityMask` returned 0, so FMOD's init failed and the game fell back to its silent engine, which crashes the world load. Now returns the previous mask (FINDINGS §5b); FMOD starts its WASAPI output. IPackageTransferManager S+0, context slots 156–159 added.
+- Skill `.claude/skills/decomp/SKILL.md` (when stuck: decompile the game, Azimuth, the reference DLLs), `tools/eh_info.py`.
+- Azimuth architecture study (FINDINGS §6): it maps the game's memory straight into the GPU (D3D12 heaps over title memory, vkd3d-proton beneath), detects changes with OS write-watch / content comparison, backs ESRAM for real and decodes XMA2. That's the difference.
+
+Works: boot → title → A → profile → past the loading screen into world setup; a 120 s run with FL_TOKEN_FAIL_ALL behaviour and real FMOD audio did not crash.
+Broken / open: GPU writes to placement memory never reach the CPU; mprotect tracking remains fragile; XMA silent; ESRAM aliasing ignored. An occasional decline in the gpumem hook (a `vmovntdq` copy at rva 0x1081ebd faulting twice) is not understood yet.
+Next step: decide the memory-model direction with the user (PLAN Phase 5b): patch DXVK for host-memory import vs. D3D12 over vkd3d-proton. Meanwhile, replace the mprotect fault hook with content comparison (cheapest Azimuth-like step).
+
+Correction: the "120 s without a crash" runs above were the game stuck on a black screen after the intro (see below), not world loading.
+
+## 2026-10-25 (evening): Claude: write-watch tracking; title screen with real FMOD; past A into DMA
+
+Did:
+- gpumem now uses userfaultfd write-protect (async) + `PAGEMAP_SCAN`, the Linux equivalent of Windows' GetWriteWatch that Azimuth uses. No SIGSEGV hook, kernel writes work, no races (FINDINGS §6). Removed the bounce buffer, protection_changed/forget, decline diagnostics.
+- With FMOD actually running, the screen stayed black after the intro. Traced with new tools to: the title waits for the Splash's "finished" flag, set when the `BASE_PressStartMusic` mixer snapshot starts, which needs MasterBank.bank, which the game's bank loader refuses because its installed-chunk set is empty for the audio chunks. We now read the package's chunks from `Mount/hash.manifest` and report them all through the whole-package PackageTransferWatcher's ChunkCompleted event (FINDINGS §5b). MasterBank loads, the title shows (video, logo, "press A"), A starts the profile/Live flow.
+- Context slot 154 InsertFence; DMA engine context slots 17/18/21/22 (copies/fills on the CPU; GPU-only uncommitted destinations skipped).
+- New diagnostics (crash.cpp): `FL_BREAK=<rva>,…` one-shot breakpoints; `FL_BREAK_REPEAT=<n>` (re-armed via single-step, logs rcx/rdx/rax), `FL_BREAK_STR` (rdx as std::string), `FL_BREAK_CSTR`/`FL_BREAK_RCXSTR=<off>`/`FL_BREAK_RBXSTR=<off>` (C strings), `FL_BREAK_DEREF=<off>` (object at [rcx+off] and its vtable); `FL_BREAK_ALL=<seconds>` differential coverage (one-shot breakpoint on every primary .pdata function, logs first hits after that time: chained entries can start on jump tables, so they are skipped); `FL_WATCH=<fn rva>:<off>` write watchpoint on this+off; `FL_CRASH_PEEK`, `FL_DUMP_THREADS_AT` peeks; `FL_NO_FMOD=1` forces the silent audio engine (A/B comparisons). The differential-coverage + watchpoint pair found the title gate in a few runs.
+
+Works: boot → intro → title with FMOD audio → A → profile/Live → loading (until the next missing piece).
+Next step: rerun with the DMA changes (the run after the DMA fill fix was not done when the shell went unavailable) and continue: whatever the game needs next while loading the world.
+
+## 2026-10-26: Claude: DMA engine, XG metadata planes, streamed textures; 3D frame renders black (bundles)
+
+Did:
+- DMA context slots 9 CopyResource, 10 CopySubresourceRegion (recorded on the immediate DXVK context), 16 InsertFence, 19 WriteStatus, 24 LZDecompressMemory (zlib via system zlib; Azimuth evidence in FINDINGS §3.1). `FL_LOG=dma` logs every DMA operation. Device 60/61 IsFencePending/IsResourcePending (never pending), context 240 SetResourceCompression (no-op).
+- XG: depth targets now get the console's planes [HTILE] DEPTH [STENCIL] with xg_x's usage values (4/7/8, we had 2/3) and HTILE size; plane offsets follow xg_x. Before this the game read garbage plane sizes and DMA-filled 4 GB with 1.0f over thread stacks (heap/stack smash). TexDesc carries bind/misc now. Colour-target CMASK/FMASK planes are still missing (STUB).
+- Streamed textures: uploads skip mips whose memory is reserved but not committed (`gpumem::readable`, process_vm_readv probe); this was a crash at ~131 s.
+- Dev-only `FL_SKIP_MOVIES=Anthem_Tone_Video` skips the 75 s movie after the title, compiled in only with `cmake -DFL_DEV_SKIP_MOVIES=ON` (OFF by default; never in shared builds).
+- VirtualAlloc logs commits/decommits/releases (`FL_LOG=memory`).
+
+Works: boot → title (FMOD) → A → profile/offline Live → Anthem_Tone_Video (Bink) → world loads and the game renders ~870 draws a frame for minutes without crashing.
+Broken: the 3D frame is black. Cause found: the game's deferred contexts (flags 0x60000/0xa0000, bit 17) are Xbox **draw bundles** that inherit render targets/viewports from the executing context (Azimuth rva 0x128ff0/0x12c540); our DXVK deferred contexts start clean, so bundle draws have no target and a 0x0 viewport. Also: DMA fills that clear GPU-owned depth placement textures only reach game memory, not DXVK; audio voices still silent (XMA/SHAPE not executed).
+Next step: implement bundle inheritance. Option A: patch DXVK's deferred context (third_party/dxvk/src/d3d11/d3d11_context_def.cpp FinishCommandList / d3d11_context_imm.cpp ExecuteCommandList) so a "bundle" command list does not reset state at its start and leaves the executing context's state as the bundle ends it. Option B: record bundle calls ourselves and replay them on the immediate context. Then map DMA depth fills onto ClearDepthStencilView.
