@@ -235,6 +235,7 @@ WINAPI HRESULT sc_Present(Iface* self, UINT sync, UINT flags) {
     static std::set<uint64_t> shots = screenshot_frames();
     static uint64_t exit_after = getenv("FL_EXIT_AFTER_FRAME") ? strtoull(getenv("FL_EXIT_AFTER_FRAME"), 0, 10) : 0;
     sc->frame++;
+    FL_LOG(fence, "present -> frame %llu", static_cast<unsigned long long>(sc->frame));
     if (sc->frame == 1) log_write("d3d", "first Present (sync %u flags 0x%x)", sync, flags);
     if (shots.count(sc->frame)) screenshot(sc);
     trace::on_present(sc->frame + 1);

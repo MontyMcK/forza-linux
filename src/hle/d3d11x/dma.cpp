@@ -78,15 +78,22 @@ WINAPI void dma_CopySubresourceRegion(Iface* self, void* dst, UINT dst_sub, UINT
 // 16 (umd 0x8f8d0): InsertFence(flags) -> u64 fence; umd also kicks off the
 // recorded work unless flags bit 0 is set. Our work is already done, so the
 // value only has to be non-zero and increasing.
-WINAPI uint64_t dma_InsertFence(Iface*, UINT) {
+WINAPI uint64_t dma_InsertFence(Iface* self, UINT flags) {
     static std::atomic<uint64_t> fence{0};
-    return ++fence;
+    uint64_t v = ++fence;
+    FL_LOG(fence, "dma %p InsertFence(0x%x) -> %llu", (void*)self, flags, static_cast<unsigned long long>(v));
+    return v;
 }
 // 17 (umd 0x8f910): InsertWaitOnFence(flags, u64 fence); fence 0 = nothing,
 // bits 48-55 name the engine. The game waits on a graphics fence (rva 0x1131b74).
-WINAPI void dma_InsertWaitOnFence(Iface*, UINT, uint64_t) {}
+WINAPI void dma_InsertWaitOnFence(Iface* self, UINT flags, uint64_t fence) {
+    FL_LOG(fence, "dma %p InsertWaitOnFence(0x%x, 0x%llx)", (void*)self, flags, static_cast<unsigned long long>(fence));
+}
 // 18 (umd 0x8f960): kick off the recorded work; HRESULT.
-WINAPI HRESULT dma_Kickoff(Iface*) { return S_OK; }
+WINAPI HRESULT dma_Kickoff(Iface* self) {
+    FL_LOG(fence, "dma %p Kickoff", (void*)self);
+    return S_OK;
+}
 // Writes go through process_vm_writev so a destination the CPU never committed
 // (GPU-only graphics memory reserved with the Xbox type bit 0x40000000, whose
 // contents live in DXVK for us) is skipped instead of faulting.

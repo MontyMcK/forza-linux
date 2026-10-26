@@ -743,6 +743,7 @@ WINAPI HRESULT ctx_FinishCommandList(void* self, BOOL restore, void** out) {
 
 WINAPI void ctx_ExecuteCommandList(void* self, void* list, BOOL restore) {
     auto* c = C::from(self);
+    FL_LOG(fence, "%s ctx %p ExecuteCommandList %p", c->deferred ? "deferred" : "immediate", self, list);
     if (auto* cl = static_cast<CommandList*>(child_of(list))) {
         for (Resource* r : cl->placements) {
             sync_for_gpu(c->dxvk, r);
@@ -815,11 +816,17 @@ WINAPI void ctx_InsertWaitUntilIdle(void*, UINT) {}                        // 15
 // 154: InsertFence(flags) -> u64 fence value the game tracks (rva 0x1131b65
 // passes it to its fence list at rva 0x10cedb0). DXVK orders the work itself,
 // so a monotonically increasing value is enough; waits on it (155) are no-ops.
-WINAPI uint64_t ctx_InsertFence(void*, UINT) {
+WINAPI uint64_t ctx_InsertFence(void* self, UINT flags) {
     static std::atomic<uint64_t> fence{0};
-    return ++fence;
+    uint64_t v = ++fence;
+    FL_LOG(fence, "%s ctx %p InsertFence(0x%x) -> %llu", C::from(self)->deferred ? "deferred" : "immediate", self,
+           flags, static_cast<unsigned long long>(v));
+    return v;
 }
-WINAPI void ctx_InsertWaitOnFence(void*, UINT, uint64_t) {}                // 155: wait on a fence value
+WINAPI void ctx_InsertWaitOnFence(void* self, UINT flags, uint64_t fence) {  // 155: wait on a fence value
+    FL_LOG(fence, "%s ctx %p InsertWaitOnFence(0x%x, 0x%llx)", C::from(self)->deferred ? "deferred" : "immediate",
+           self, flags, static_cast<unsigned long long>(fence));
+}
 // 156-159 Remap{ConstantBuffer,ShaderResource,Sampler,VertexBuffer}Inheritance
 // (dst stage, dst slot, src stage, src slot), stages as in compact commands
 // (0 VS, 1 HS, 2 DS, 3 GS, 4 PS, 5 CS). Inside a draw bundle: from here on,
