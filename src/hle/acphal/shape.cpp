@@ -27,6 +27,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <ctime>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -142,15 +143,45 @@ std::unique_ptr<Decoder> make_decoder(int channels, int rate) {
     return std::make_unique<SilentDecoder>(channels);
 }
 
+// FL_DUMP_XMA=<dir>: the first 40 voices' input packets (v<n>.xma, 2048-byte
+// packets as fed to the decoder) and decoded output (v<n>.f32, interleaved
+// floats), plus v<n>.txt (channels, rate), to study decoding offline.
+struct Dump {
+    FILE* xma = nullptr;
+    FILE* pcm = nullptr;
+};
+Dump open_dump(int channels, int rate) {
+    static const char* dir = getenv("FL_DUMP_XMA");
+    static int count = 0;
+    Dump d;
+    if (!dir || count >= 40) return d;
+    int n = count++;
+    std::string base = std::string(dir) + "/v" + std::to_string(n);
+    d.xma = fopen((base + ".xma").c_str(), "wb");
+    d.pcm = fopen((base + ".f32").c_str(), "wb");
+    if (FILE* t = fopen((base + ".txt").c_str(), "w")) {
+        fprintf(t, "%d %d\n", channels, rate);
+        fclose(t);
+    }
+    return d;
+}
+
 struct Voice {
     std::unique_ptr<Decoder> dec;
+    Dump dump;
     int channels = 1;
     int rate = 48000;
     std::vector<float> pcm;  // decoded, interleaved
     size_t pos = 0;          // read index into pcm (samples x channels)
+    size_t decoded = 0;      // sample frames decoded so far (FL_LOG=audio)
+    uint32_t steps = 0, inactive = 0, starved_steps = 0, zero_rate = 0;  // src_step outcomes (FL_LOG=audio)
+    uint32_t start_frame = 0;
     bool starved = false;
 };
 std::map<uint32_t, Voice> g_voices;  // by XMA context index
+uint32_t g_starved_frames = 0;       // FL_LOG=audio statistics
+uint32_t g_dma_overwrites = 0, g_dma_overreads = 0, g_dma_writes = 0;
+uint32_t g_ring_blocks = 0;
 
 volatile uint32_t* ctx(uint8_t* array, uint32_t count, uint32_t size, uint32_t i) {
     return array && i < count ? reinterpret_cast<volatile uint32_t*>(array + size_t(i) * size) : nullptr;
@@ -192,7 +223,15 @@ bool fill(Voice& v, volatile uint32_t* x, size_t need) {
             v.pcm.erase(v.pcm.begin(), v.pcm.begin() + v.pos);
             v.pos = 0;
         }
+        size_t before = v.pcm.size();
         v.dec->packet(p, v.pcm);
+        v.decoded += (v.pcm.size() - before) / v.channels;
+        if (v.dump.xma) {
+            fwrite(p, 1, kPacketBytes, v.dump.xma);
+            fwrite(v.pcm.data() + before, sizeof(float), v.pcm.size() - before, v.dump.pcm);
+            fflush(v.dump.xma);
+            fflush(v.dump.pcm);
+        }
         if (++pkt == packets) {
             x[4] = x[4] ^ 0x80000000;
             x[0] = x[0] & ~(1u << (20 + cur));
@@ -211,30 +250,42 @@ void src_step(uint32_t n, float* left, float* right, uint32_t graph_apu, const P
         log_once("SHAPE: SRC context outside the arrays", n);
         return;
     }
+    auto it = g_voices.find(n);
     if ((s[1] & 0xc00000) != 0x400000 || !(x[1] >> 31)) {
         log_once("SHAPE: SRC step on a voice that is not an active XMA output", s[1]);
+        if (it != g_voices.end()) it->second.inactive++;
         return;
     }
     uint32_t rate = s[1] & 0x1fffff, target = s[4] & 0x1fffff;
     if (rate != target) log_once("SHAPE: SRC rate ramps are not implemented (using the target rate)", target);
     rate = target;
-    if (!rate) return;
-    auto it = g_voices.find(n);
+    if (!rate) {
+        if (it != g_voices.end()) it->second.zero_rate++;
+        return;
+    }
     if (it == g_voices.end()) {
         static const int kRates[4] = {24000, 32000, 44100, 48000};
         Voice v;
         v.channels = int(x[1] >> 29 & 1) + 1;
         v.rate = kRates[x[1] >> 27 & 3];
         v.dec = make_decoder(v.channels, v.rate);
+        v.dump = open_dump(v.channels, v.rate);
         if (s[2] || (s[3] & 0x1ffffff)) log_once("SHAPE: XMA voice starts from an already rendered SRC context", n);
+        v.start_frame = g_frame;
         it = g_voices.emplace(n, std::move(v)).first;
-        FL_LOG(audio, "SHAPE: XMA voice %u: %d ch %d Hz rate 0x%x", n, it->second.channels, it->second.rate, rate);
+        FL_LOG(audio, "SHAPE: XMA voice %u: %d ch %d Hz rate 0x%x; loops %u start %u end %u subframes %u/%u/%u "
+               "decode %u; packets %u/%u", n, it->second.channels, it->second.rate, rate, x[0] >> 12 & 0xff,
+               x[3] & 0x3ffffff, x[4] & 0x3ffffff, x[1] >> 12 & 3, x[1] >> 14 & 7, x[1] >> 17 & 7, x[1] >> 20 & 15,
+               x[0] & 0xfff, x[1] & 0xfff);
     }
     Voice& v = it->second;
+    v.steps++;
     uint32_t frac = s[3] & 0x3ffff;
     uint64_t adv = uint64_t(rate) * kFrameSamples + frac;
     uint32_t consumed = uint32_t(adv >> 18);
     if (!fill(v, x, consumed + 2)) {  // +2: linear interpolation reads one sample ahead
+        g_starved_frames++;
+        v.starved_steps++;
         if (!v.starved) post({4, {0, n, graph_apu, 0, 0}});
         v.starved = true;
         return;
@@ -270,6 +321,9 @@ void dma_step(const float* mix, uint32_t n) {
         return;
     }
     uint32_t w = d[1] >> 8 & 0x1f, r = d[1] & 0x1f;
+    g_dma_writes++;
+    g_ring_blocks = blocks;
+    if (d[1] >> 16 & 1) g_dma_overwrites++;  // full: this block was not read yet
     if (mix) memcpy(ring + w * kFrameSamples, mix, kFrameSamples * 4);
     else memset(ring + w * kFrameSamples, 0, kFrameSamples * 4);
     w = (w + 1) % blocks;
@@ -293,7 +347,20 @@ bool command(uint32_t type, const uint8_t* payload) {
             }
             for (uint32_t i = 0; i < 512; i++)
                 if (mask[i >> 5] >> (i & 31) & 1) {
-                    if (type >= 7) g_voices.erase(i);  // stop: the next SRC step starts a new voice
+                    if (type >= 7) {
+                        auto it = g_voices.find(i);
+                        if (it != g_voices.end() && log_enabled("audio")) {
+                            const Voice& v = it->second;
+                            volatile uint32_t* x = xma_ctx(i);
+                            volatile uint32_t* sc = src_ctx(i);
+                            FL_LOG(audio, "SHAPE: XMA %u stopped: decoded %zu, played %u, left unplayed %zu samples; "
+                                   "input valid bits %u; SRC steps %u (inactive %u, starved %u, rate 0 %u) over %u "
+                                   "graphs", i, v.decoded, sc ? sc[2] : 0, (v.pcm.size() - v.pos) / v.channels,
+                                   x ? (x[0] >> 20 & 3) : 0, v.steps, v.inactive, v.starved_steps, v.zero_rate,
+                                   g_frame - v.start_frame);
+                        }
+                        g_voices.erase(i);  // stop: the next SRC step starts a new voice
+                    }
                     FL_LOG(audio, "SHAPE: XMA %u %s", i, type >= 7 ? "stop" : "start");
                 }
             return true;
@@ -303,6 +370,9 @@ bool command(uint32_t type, const uint8_t* payload) {
             volatile uint32_t* d = dma_ctx(p[0]);
             if (!d) return true;
             uint32_t blocks = (d[3] & 0x1f) + 1;
+            uint32_t w = d[1] >> 8 & 0x1f, r = d[1] & 0x1f;
+            uint32_t ready = d[1] >> 16 & 1 ? blocks : (w + blocks - r) % blocks;
+            if (p[1] > ready) g_dma_overreads += p[1] - ready;  // FMOD read blocks we had not written
             d[1] = ((d[1] & 0x1f) + p[1]) % blocks | (d[1] & 0xfffeffe0);
             return true;
         }
@@ -323,9 +393,24 @@ bool command(uint32_t type, const uint8_t* payload) {
     return false;
 }
 
-void run_graph(uint32_t count, uint32_t apu, const Post& post) {
+void run_graph(const uint64_t* ops, uint32_t count, uint32_t apu, const Post& post) {
     std::lock_guard lock(g_mutex);
-    const auto* ops = reinterpret_cast<const uint64_t*>(apu_va(apu, count * 8));
+    // FL_LOG=audio: every 5 s (1875 frames), voice-frames that had no decoded
+    // input (starved) and how late the graphs run against real time.
+    static int64_t t0 = 0;
+    static uint32_t graphs = 0;
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t now = ts.tv_sec * 1000000000LL + ts.tv_nsec;
+    if (!t0) t0 = now;
+    if (++graphs == 1875) {
+        FL_LOG(audio, "SHAPE: %u graphs in %.2f s (real time: 5.00 s), %u starved voice-frames; DMA %u block "
+               "writes (ring %u blocks), %u overwrote unread blocks, %u blocks read before written", graphs,
+               (now - t0) / 1e9, g_starved_frames, g_dma_writes, g_ring_blocks, g_dma_overwrites, g_dma_overreads);
+        graphs = 0;
+        g_starved_frames = g_dma_writes = g_dma_overwrites = g_dma_overreads = 0;
+        t0 = now;
+    }
     if (!ops) {
         log_once("SHAPE: flowgraph outside the APU heaps", apu);
         post({2, {0, apu, 0, 0, 0}});

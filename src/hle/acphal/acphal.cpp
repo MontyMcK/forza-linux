@@ -21,6 +21,7 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <vector>
 #include <thread>
 
 #include "common/log.h"
@@ -269,6 +270,11 @@ struct Command {
     uint64_t context;
     uint32_t arg;
     uint8_t payload[112];
+    // Flowgraph commands: the opcodes, copied at submit. FMOD builds every
+    // graph in ONE APU buffer and queues up to ~3 graphs ahead, so reading the
+    // buffer when the graph runs saw a later (or half-written) graph: voices
+    // dropped out of most frames, the crackle.
+    std::vector<uint64_t> graph;
 };
 
 struct AcpHal;
@@ -335,7 +341,21 @@ struct AcpHal {
                 uint32_t count, apu;
                 memcpy(&count, c.payload, 4);
                 memcpy(&apu, c.payload + 4, 4);
-                shape::run_graph(count, apu, post_fn);
+                if (log_enabled("audio")) {  // queue depth and graph buffers, every 1875 graphs
+                    static size_t max_queued = 0, graphs = 0;
+                    static std::set<uint32_t> bufs;
+                    size_t queued = 0;
+                    for (const Command& q : commands) queued += q.type == kCmdFlowgraph;
+                    max_queued = std::max(max_queued, queued);
+                    bufs.insert(apu);
+                    if (++graphs == 1875) {
+                        FL_LOG(audio, "ACP: up to %zu flowgraphs queued behind the running one; %zu distinct graph "
+                               "buffers; %u opcodes", max_queued, bufs.size(), count);
+                        graphs = max_queued = 0;
+                        bufs.clear();
+                    }
+                }
+                shape::run_graph(c.graph.empty() ? nullptr : c.graph.data(), count, apu, post_fn);
                 graph = true;
             } else if (!shape::command(c.type, c.payload)) {
                 static std::set<uint32_t> seen;
@@ -345,18 +365,19 @@ struct AcpHal {
             }
             if (c.context)
                 post({kMsgCommandDone, {0, c.type, uint32_t(c.context), uint32_t(c.context >> 32), shape::frame()}});
-            if (graph) break;  // one flowgraph per audio frame
+            (void)graph;
         }
     }
 
+    // Commands run as soon as they are submitted, in order, like Azimuth's
+    // audio processor thread. FMOD paces SHAPE itself: it submits a graph when
+    // its DMA rings need data. Running graphs on our own 128-sample clock
+    // instead kept up to 3 queued behind, FMOD's view of the rings was stale,
+    // and it left voices out of ~2/3 of the graphs (choppy, crackling sound).
     void run() {
-        using namespace std::chrono;
-        auto period = duration_cast<steady_clock::duration>(duration<double>(128.0 / 48000.0));
-        auto next = steady_clock::now();
         std::unique_lock lock(m);
         while (!stop) {
-            next += period;
-            cv.wait_until(lock, next, [&] { return stop; });
+            cv.wait(lock, [&] { return stop || !commands.empty(); });
             if (stop) break;
             lock.unlock();
             tick();
@@ -399,8 +420,15 @@ WINAPI HRESULT acp_submit(AcpHal* self, uint32_t type, uint64_t context, uint32_
     size_t n = payload_size(type);
     if (n == SIZE_MAX || (n && !data)) return E_INVALIDARG_;
     if (self->commands.size() >= self->cmd_cap) return 0x8AC80003;  // queue full
-    Command c{type, id, context, arg, {}};
+    Command c{type, id, context, arg, {}, {}};
     if (n) memcpy(c.payload, data, n);
+    if (type == kCmdFlowgraph) {
+        uint32_t count, apu;
+        memcpy(&count, c.payload, 4);
+        memcpy(&apu, c.payload + 4, 4);
+        if (const auto* ops = reinterpret_cast<const uint64_t*>(apu_va(apu, count * 8)))
+            c.graph.assign(ops, ops + count);
+    }
     static std::atomic<int> logged{0};
     if (logged++ < 40) {
         uint32_t w0 = 0;
@@ -408,7 +436,8 @@ WINAPI HRESULT acp_submit(AcpHal* self, uint32_t type, uint64_t context, uint32_
         FL_LOG(audio, "ACP submit type %u context 0x%llx id 0x%x arg 0x%x payload[0] 0x%x", type,
                (unsigned long long)context, id, arg, w0);
     }
-    self->commands.push_back(c);
+    self->commands.push_back(std::move(c));
+    self->cv.notify_one();
     return S_OK;
 }
 

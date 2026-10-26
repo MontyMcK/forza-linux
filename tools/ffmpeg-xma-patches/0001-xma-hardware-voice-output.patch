@@ -1,0 +1,28 @@
+# forza-linux: make FFmpeg's XMA decoder behave like a SHAPE hardware voice (one stream):
+# output each frame as it is decoded (no 4096-sample hold-back for stream
+# alignment, which only an end of file would flush) and keep the first frame.
+# LGPL-2.1, like the file it changes.
+--- a/libavcodec/wmaprodec.c	2026-10-27 08:50:41.356153976 +1300
++++ b/libavcodec/wmaprodec.c	2026-10-27 08:50:41.362531294 +1300
+@@ -431,7 +431,8 @@
+     }
+ 
+     /** frame info */
+-    s->skip_frame = 1; /* skip first frame */
++    /* skip first frame; the XMA hardware outputs it (forza-linux) */
++    s->skip_frame = !(avctx->codec_id == AV_CODEC_ID_XMA1 || avctx->codec_id == AV_CODEC_ID_XMA2);
+ 
+     s->packet_loss = 1;
+     s->len_prefix  = (s->decode_flags & 0x40);
+@@ -1923,7 +1924,10 @@
+             nb_samples = FFMIN(nb_samples, av_audio_fifo_size(s->samples[0][i]));
+         }
+ 
+-        if (!eof && avpkt->size)
++        /* Several streams are held back to stay aligned. One stream (an XMA
++         * hardware voice) gives its samples as soon as they are decoded,
++         * like the hardware: there is no end of file to flush them (forza-linux). */
++        if (!eof && avpkt->size && s->num_streams > 1)
+             nb_samples -= FFMIN(nb_samples, 4096);
+ 
+         /* copy samples from buffer to output if possible */

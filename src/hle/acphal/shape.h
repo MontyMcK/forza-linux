@@ -37,9 +37,11 @@ using Post = std::function<void(const Message&)>;
 // Returns false for a type SHAPE does not handle.
 bool command(uint32_t type, const uint8_t* payload);
 
-// Runs one flowgraph (`count` 64-bit opcodes at `apu`) for one audio frame.
-// Posts message 4 for a starved SRC voice and message 2 when done.
-void run_graph(uint32_t count, uint32_t apu, const Post& post);
+// Runs one flowgraph (`count` 64-bit opcodes `ops`, copied from APU address
+// `apu` when the command was submitted; nullptr if that was outside the APU
+// heaps) for one audio frame. Posts message 4 for a starved SRC voice and
+// message 2 when done.
+void run_graph(const uint64_t* ops, uint32_t count, uint32_t apu, const Post& post);
 
 // The frame counter stamped into SRC/DMA contexts (increments per graph).
 uint32_t frame();

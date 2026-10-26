@@ -101,6 +101,8 @@ struct AudioClient : Object {
     std::thread device;
     SDL_AudioStream* stream = nullptr;  // null: drop frames (null backend)
     uint64_t pushed = 0;                // frames handed to SDL
+    int device_frames = 0;              // frames the device pulls at a time
+    uint32_t checks = 0, low = 0;       // FL_LOG=audio statistics
 
     ~AudioClient() override {
         quit = true;
@@ -129,17 +131,24 @@ struct AudioClient : Object {
             return;
         }
         SDL_AudioSpec spec{sf, fmt->nChannels, static_cast<int>(fmt->nSamplesPerSec)};
+        // Ask for ~10 ms device periods (PipeWire's default quantum here is
+        // 1024 frames, 21 ms); FL_AUDIO_FRAMES overrides.
+        const char* frames_env = getenv("FL_AUDIO_FRAMES");
+        SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, frames_env ? frames_env : "480");
         stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
         if (!stream) {
             FL_ERROR("audio: SDL_OpenAudioDeviceStream failed: %s (sound disabled)", SDL_GetError());
             return;
         }
-        fl::log_write("audio", "SDL audio stream open (%s)", SDL_GetCurrentAudioDriver());
+        SDL_AudioSpec dev{};
+        if (!SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(stream), &dev, &device_frames)) device_frames = 0;
+        fl::log_write("audio", "SDL audio stream open (%s), device period %d frames", SDL_GetCurrentAudioDriver(),
+                      device_frames);
     }
 
     void device_loop() {
         using namespace std::chrono;
-        constexpr int kPeriodMs = 10;
+        constexpr int kPeriodMs = 5;  // refill events: FMOD tops the buffer up between device pulls
         auto next = steady_clock::now();
         while (!quit) {
             next += milliseconds(kPeriodMs);
@@ -150,6 +159,15 @@ struct AudioClient : Object {
                 if (!running) continue;
                 if (stream) {
                     update_padding();
+                    // FL_LOG=audio: how often the queue nearly ran dry (less
+                    // than one device period left: the next pull underruns).
+                    ++checks;
+                    if (padding < static_cast<uint32_t>(device_frames)) ++low;
+                    if (checks == 500) {
+                        FL_LOG(audio, "WASAPI: %u of %u checks (5 ms apart) had under one device period queued "
+                               "(%d frames); buffer %u", low, checks, device_frames, buffer_frames);
+                        checks = low = 0;
+                    }
                 } else {
                     uint32_t consume = std::min<uint32_t>(padding, rate * kPeriodMs / 1000);
                     padding -= consume;
@@ -171,9 +189,17 @@ struct AudioClient : Object {
         c->rate = fmt->nSamplesPerSec;
         // duration is in 100 ns units; keep at least 20 ms.
         c->buffer_frames = static_cast<uint32_t>(std::max<int64_t>(duration, 200000) * c->rate / 10000000);
-        c->staging.resize(static_cast<size_t>(c->buffer_frames) * c->block);
         c->initialized = true;
         c->open_backend(fmt);
+        // The game can't queue more than the buffer. The device pulls
+        // device_frames at a time on its own clock, and FMOD writes one 10 ms
+        // block per event when there is room for it. FMOD's 20 ms (960 frames)
+        // against PipeWire's 1024-frame quantum left a 64-frame gap every 1024
+        // frames (the "bad cable" crackle); with 480-frame periods the two
+        // clocks drifted so two pulls fell between writes ~12 times a second.
+        // Four device periods (~40 ms) ride that out.
+        c->buffer_frames = std::max<uint32_t>(c->buffer_frames, static_cast<uint32_t>(c->device_frames) * 4);
+        c->staging.resize(static_cast<size_t>(c->buffer_frames) * c->block);
         fl::log_write("audio", "IAudioClient::Initialize: %u Hz, %u ch, %u bits, tag 0x%x, buffer %u frames, flags 0x%x%s"
                       " (asked duration %lld period %lld, share %d)",
                       fmt->nSamplesPerSec, fmt->nChannels, fmt->wBitsPerSample, fmt->wFormatTag, c->buffer_frames,
