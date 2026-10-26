@@ -123,7 +123,7 @@ Implement imports in the order the game hits them. Rules of thumb:
   - [x] The unwinder is validated on real game code: crash backtraces walk cleanly to the thread entry.
   - [ ] **Not yet exercised by a real game throw.** Watch the first one closely (`FL_LOG=seh`). Also still missing: `__abi_WinRTraise*Exception` (vccorlib), which needs a Platform::Exception object + ThrowInfo built in our memory.
   - [ ] Map SIGSEGV/SIGILL/SIGFPE inside game code to SEH dispatch (later, only if the game relies on `__try`).
-- [ ] `QueryPerformanceCounter` → `CLOCK_MONOTONIC` (pick a 10 MHz frequency).
+- [x] `QueryPerformanceCounter` → `CLOCK_MONOTONIC` (pick a 10 MHz frequency).
 - [ ] `SetThreadAffinityMask` / ideal processor: accept and log. The Xbox has 6–7 game cores, so don't pin.
 
 Status (2026-10-23): kernelx is implemented 112/112 (files+IOCP, threads+suspend, fibers with an asm context switch, waits, critical sections, SRW locks, VirtualAlloc, XMem hooks). Still a trap: `TitleMemoryStatus` (struct layout unknown). msvcr110 has startup, strings, math, stdio with an MSVC printf/scanf engine, std::exception/type_info/RTTI, and ConcRT locks/events/scheduler/concurrent_queue. **Not done:** C++ EH/SEH (`_CxxThrowException`, `__CxxFrameHandler3`, `__C_specific_handler`, exception_ptr), PPL task collections and cancellation tokens, most of msvcp110 (iostreams/locale).
@@ -180,7 +180,7 @@ The hardest phase. The order matters.
   - [x] Black shadows / black building: DXVK SRV hazard unbinding broke the game's probe mip chain (patch 0003).
   - [ ] Sky shows coarse banding (top-left of the gameplay frame).
 - [ ] ESRAM aliasing: resources share ESRAM offsets (FINDINGS §5b); find out whether any pass reads through an alias what another wrote.
-- [ ] Untiler speed: per-element addrlib calls are fine for BC textures, slow for big uncompressed ones; cache the per-macro-tile pattern.
+- [x] Untiler speed: per-layout cached plans (tile bases + in-tile pattern, checked against addrlib) and row bands on a worker pool, 10-50x faster (2026-10-27).
 - [ ] GPU→CPU: placement memory the GPU writes (render targets the CPU reads back) is not synced back.
 - [ ] Unified memory: on Xbox the CPU and GPU share RAM, and the game may write GPU data directly (placement resources, `D3DMapEsramMemory`, "fast semantics" with no Map/Unmap).
   - Plan A: back game "graphics" allocations with Vulkan host-visible memory, or import them with **`VK_EXT_external_memory_host`** (RADV supports it), so GPU buffers alias the game's pointers.
@@ -218,7 +218,11 @@ Azimuth runs the game because the GPU reads the game's memory directly. Our copy
 ## Phase 7: playable and pleasant
 
 - [ ] Racing wheel (`Microsoft.Xbox.Input.Wheel`) → SDL joystick/haptics
-- [ ] Settings: resolution, uncapped framerate (find the frame limiter RVA), FOV
+- [x] Frame pacing: 30 fps on a virtual 59.94 Hz vblank on any monitor (the update steps a fixed 1/29.97 s per frame); fullscreen (FL_FULLSCREEN, F11/Alt+Enter); launcher settings (2026-10-27).
+- [ ] Dynamic / uncapped frame rate at real speed: the update step is rva 0xf58770, the engine options are `synchroniseUpdateToRenderThread` / `unlockframerate` (FINDINGS §6c). Find how options reach the parser (rva 0x299950), or patch the `je` at rva 0xf587dd. The UI clock also steps per frame (Azimuth's "UI step"/"UI clock tick").
+- [ ] Settings: resolution, FOV
+- [x] Write tracking per frame instead of per bind (placement "frame scan", hot/cold resources), ~4.7 → ~1 ms per frame; yield backoff for the game's spin semaphores (~2 cores less at 30 fps) (2026-10-27).
+- [ ] Streaming hitches left: rare 40-70 ms frames while big textures arrive, and the world load (~80-190 ms frames). Next: upload big textures from a worker (untile + UpdateSubresource off the render thread).
 - [ ] Performance: profile with `perf` (the game code shows up as anonymous memory, so add a perf map file `/tmp/perf-<pid>.map` with RTTI names)
 - [ ] Packaging: `forza-linux --game-dir /path/to/Mount`, plus `tools/extract_dump.sh`. A user supplies their own dump, and nothing from the game ships.
 - [ ] Optional: online and Live features stay stubbed

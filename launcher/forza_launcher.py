@@ -103,12 +103,15 @@ MH_POSITIONS = [("top-left", "Top left"), ("top-center", "Top centre"), ("top-ri
 DXVK_HUD_ITEMS = [("fps", "FPS"), ("frametimes", "Frame times"), ("gpuload", "GPU load"), ("memory", "Memory"),
                   ("submissions", "Submissions"), ("drawcalls", "Draw calls"), ("pipelines", "Pipelines"),
                   ("compiler", "Shader compiler"), ("version", "DXVK version"), ("devinfo", "Device info")]
+FRAME_PACING = [("", "Console timing: 30 fps"),
+                ("dynamic", "Dynamic (not working yet: runs too fast)"),
+                ("off", "Uncapped, game runs too fast")]
 WINDOW_SIZES = [("", "1280 × 720 (runtime default)"), ("1600x900", "1600 × 900"), ("1920x1080", "1920 × 1080"),
                 ("2560x1440", "2560 × 1440"), ("3840x2160", "3840 × 2160"), ("custom", "Custom…")]
 
 DEFAULTS = {
     "game_dir": "", "runtime": "",
-    "window": "", "window_custom": "1920x1080", "audio": True, "gamemode": False,
+    "window": "", "window_custom": "1920x1080", "audio": True, "gamemode": False, "frame_pacing": "", "fps_cap": 0, "fullscreen": False,
     "skip_intro_movie": True, "skip_logo_movie": False, "skip_extra_movies": "",
     "minimize_on_play": False, "logs_on_crash": True, "warn_other_instance": True,
     "mangohud": False, "mh_layout": "extended", "mh_metrics": list(MH_PRESETS["extended"]),
@@ -398,6 +401,12 @@ def build_launch(cfg: dict, rt: RuntimeInfo) -> LaunchPlan:
         env["FL_WINDOW"] = cfg["window"]
     if not cfg["audio"]:
         env["FL_AUDIO"] = "null"
+    if cfg["fullscreen"]:
+        env["FL_FULLSCREEN"] = "1"
+    if cfg["frame_pacing"]:
+        env["FL_FRAME_PACING"] = cfg["frame_pacing"]
+    if cfg["frame_pacing"] == "dynamic" and cfg["fps_cap"] > 0:
+        env["FL_FPS_CAP"] = str(cfg["fps_cap"])
 
     skips = (LONG_MOVIES if cfg["skip_intro_movie"] else []) + ([LOGO_MOVIE] if cfg["skip_logo_movie"] else [])
     skips += [s.strip() for s in cfg["skip_extra_movies"].split(",") if s.strip()]
@@ -1166,6 +1175,9 @@ class PlayPage(QWidget):
         self.skip_chip = self._chip(quick, "Skip long movies", "Intro and opening", b.toggle("skip_intro_movie"))
         self._chip(quick, "MangoHud", "Performance overlay", b.toggle("mangohud"))
         self._chip(quick, "GameMode", "CPU boost", b.toggle("gamemode"))
+        self.fps_combo = b.combo("frame_pacing", [("", "30 fps"), ("dynamic", "Dynamic (WIP)"), ("off", "Uncapped")],
+                                 130)
+        self._chip(quick, "Frame rate", "30 fps is the stable one", self.fps_combo)
         self._chip(quick, "Sound", "Game audio", b.toggle("audio"))
         v.addLayout(quick)
 
@@ -1226,6 +1238,14 @@ class SettingsPage(QScrollArea):
         disp = Card("Display and sound")
         size = b.combo("window", WINDOW_SIZES)
         disp.add_row("Window size", "The game window starts at this size; you can resize it while playing.", size)
+        disp.add_row("Fullscreen", "Borderless fullscreen. F11 or Alt+Enter switches while playing. Smoothest with "
+                     "variable refresh on, or a 60/120/240 Hz display mode (30 fps divides evenly).",
+                     b.toggle("fullscreen"))
+        disp.add_row("Frame rate", "The game was made for 30 fps. Dynamic lets it run faster while game time "
+                     "follows the real clock; uncapped runs the game too fast.",
+                     b.combo("frame_pacing", FRAME_PACING, 340))
+        self.cap_row = disp.add_row("FPS cap", "Dynamic mode only. Off: up to your monitor's refresh rate.",
+                                    b.spin("fps_cap", 0, 500, " fps", "Off", 10))
         self.custom = b.line("window_custom", "1920x1080", 140)
         self.custom_row = disp.add_row("Custom size", "WIDTHxHEIGHT", self.custom)
         disp.add_row("Sound", "Off runs the game with silent audio output.", b.toggle("audio"))
@@ -1266,6 +1286,7 @@ class SettingsPage(QScrollArea):
 
     def update_state(self, key: str = "") -> None:
         self.custom_row.show_row(self.win.cfg["window"] == "custom")
+        self.cap_row.show_row(self.win.cfg["frame_pacing"] == "dynamic")
 
 
 class DevPage(QScrollArea):
@@ -1910,7 +1931,13 @@ class MainWindow(QMainWindow):
             bits.append("MangoHud")
         if "gamemoderun" in plan.cmd:
             bits.append("GameMode")
-        if "FL_WINDOW" in plan.env:
+        if plan.env.get("FL_FRAME_PACING") == "off":
+            bits.append("uncapped (too fast)")
+        elif plan.env.get("FL_FRAME_PACING") == "dynamic":
+            bits.append("dynamic fps" + (f" ≤ {cfg['fps_cap']}" if cfg["fps_cap"] else ""))
+        if "FL_FULLSCREEN" in plan.env:
+            bits.append("fullscreen")
+        elif "FL_WINDOW" in plan.env:
             bits.append(plan.env["FL_WINDOW"].replace("x", " × "))
         if "FL_LOG" in plan.env:
             bits.append(f"logging {plan.env['FL_LOG']}")
@@ -1949,10 +1976,22 @@ class MainWindow(QMainWindow):
             p.c_last.set("None yet", "")
 
         others = running_instances({self.proc.processId()} if self.proc else set())
+        notes = []
         if others:
-            p.banner.setText(f"Another forza-linux is already running (pid {', '.join(map(str, others))}). Two "
-                             "copies share the GPU, so both run slower.")
-        p.banner.setVisible(bool(others))
+            notes.append(f"Another forza-linux is already running (pid {', '.join(map(str, others))}). Two copies "
+                         "share the GPU, so both run slower.")
+        # The game shows a new frame every 1/29.97 s: on a display whose refresh
+        # isn't a multiple of that, frames stay up for uneven times (judder).
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        hz = screen.refreshRate() if screen else 0
+        if hz > 0 and not cfg["frame_pacing"]:
+            per = hz / 29.97
+            if abs(per - round(per)) > 0.05:
+                notes.append(f"Your display runs at {hz:.0f} Hz, which 30 fps doesn't divide evenly, so motion "
+                             "judders slightly. For perfectly smooth frames use a 60/120/240 Hz mode, or turn on "
+                             "Adaptive Sync and play fullscreen.")
+        p.banner.setText("\n".join(notes))
+        p.banner.setVisible(bool(notes))
 
         if self.proc:
             self.side_status.setText("● Game running")

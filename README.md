@@ -23,7 +23,7 @@ python3 launcher/forza_launcher.py --print-command     # show what Play would ru
 ```
 
 - **Play**: starts `build/forza-linux` with your game folder and shows the game's state (running, exited, crashed).
-- **Settings**: game folder, runtime, window size, sound, GameMode, skipping the long movies, Anthem_Tone_Video and the new-game IE_opening (developer builds only, see CMakeLists.txt `FL_DEV_SKIP_MOVIES`).
+- **Settings**: game folder, runtime, window size, fullscreen (F11 / Alt+Enter in game), frame rate (30 fps console timing by default), sound, GameMode, skipping the long movies, Anthem_Tone_Video and the new-game IE_opening (developer builds only, see CMakeLists.txt `FL_DEV_SKIP_MOVIES`).
 - **Developer**: MangoHud (layout, items, position, FPS limit), DXVK HUD and log level, Vulkan validation, `FL_LOG` channels, test automation (`FL_EXIT_AFTER_FRAME`, `FL_SCREENSHOT_AT_FRAME`, `FL_AUTOPRESS`, a separate test save), extra environment variables and arguments, the exact command, and a rebuild button.
 - **Saves**: back up, restore, or start fresh. Replaced saves are always moved to `~/.local/share/forza-linux-backups/` first.
 - **Logs**: live output with filters. Every session's full output is kept in `~/.cache/forza-linux/logs/`.

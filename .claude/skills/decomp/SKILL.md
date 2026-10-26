@@ -49,3 +49,10 @@ Queries: `addr:<rva>` (the function containing it), `callers:<rva>` (code and da
 5. Implement it, run, and record the fact plus evidence in `docs/FINDINGS.md` (Rule 2).
 
 If Azimuth answers the same way we do and the game still breaks, the difference is in our runtime (threading, PPL/ConcRT, SEH/C++ EH, D3D). Read the reference msvcr110/umd for the real semantics.
+
+## Test runs (Monty's defaults)
+
+- Skip both long movies: `FL_SKIP_MOVIES=Anthem_Tone_Video,IE_opening` (needs a `-DFL_DEV_SKIP_MOVIES=ON` build, like `build/`; the CMake default must stay OFF in anything pushed).
+- Run test builds under MangoHud: `mangohud ./build/forza-linux ...`. Use the overlay only: MangoHud's own file logging (`log_duration`) crashed the game when the log ended.
+- Use a separate save, `XDG_DATA_HOME=<scratch>/xdg`, and never start a test while Monty's own game is running (`pgrep -a forza-linux`): both share the GPU.
+- Standard run: `XDG_DATA_HOME=<scratch>/xdg FL_SKIP_MOVIES=Anthem_Tone_Video,IE_opening FL_AUTOPRESS="40:A,42:A,46:A,50:A,55:A,60:A" mangohud ./build/forza-linux --game-dir <Mount>`. Gameplay starts at ~100 s.
