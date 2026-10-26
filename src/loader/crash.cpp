@@ -384,12 +384,51 @@ static void trap_handler(int, siginfo_t* si, void* uc_) {
     static thread_local uint64_t last_hit = 0, last_rsp = 0, last_ret = 0;
     if (lo < g_breaks.size() && g_breaks[lo].addr == at) {
         Breakpoint& b = g_breaks[lo];
+        // FL_BREAK_RETURN=<rva>=<value>[,...] (debug experiments only): that function
+        // returns <value> at once instead of running (its rva must also be in FL_BREAK).
+        static const std::vector<std::pair<uint64_t, uint64_t>> forced = [] {
+            std::vector<std::pair<uint64_t, uint64_t>> v;
+            if (const char* e = getenv("FL_BREAK_RETURN"))
+                for (const char* p = e; *p;) {
+                    uint64_t rva = strtoull(p, const_cast<char**>(&p), 16);
+                    uint64_t val = *p == '=' ? strtoull(p + 1, const_cast<char**>(&p), 0) : 0;
+                    v.push_back({rva, val});
+                    if (*p == ',') p++;
+                    else break;
+                }
+            return v;
+        }();
+        for (auto& [rva, val] : forced)
+            if (at - reinterpret_cast<uint64_t>(main_image().base) == rva) {
+                static std::atomic<int> logged{0};
+                if (logged++ < 3) fl::log_write("break", "forced return 0x%llx from game rva 0x%llx", (unsigned long long)val,
+                                                (unsigned long long)rva);
+                g[REG_RAX] = val;
+                g[REG_RIP] = *reinterpret_cast<uint64_t*>(g[REG_RSP]);
+                g[REG_RSP] += 8;
+                return;  // the int3 stays armed
+            }
         // FL_BREAK_REPEAT=<n>: log up to n hits per breakpoint (re-armed after
         // single-stepping the original instruction).
         static const int repeat = getenv("FL_BREAK_REPEAT") ? atoi(getenv("FL_BREAK_REPEAT")) : 0;
         if (repeat) {
             static std::atomic<int> counts[512];
-            int c = lo < 512 ? counts[lo]++ : repeat;
+            // FL_BREAK_AFTER=<seconds>: repeat-mode hits before then are not counted or logged.
+            static const double after = getenv("FL_BREAK_AFTER") ? atof(getenv("FL_BREAK_AFTER")) : 0;
+            bool early = after > 0 &&
+                         std::chrono::duration<double>(std::chrono::steady_clock::now() - g_break_t0).count() < after;
+            // FL_BREAK_RET=<rva>: only hits whose return address is that rva count.
+            static const uint64_t want_ret = getenv("FL_BREAK_RET") ? strtoull(getenv("FL_BREAK_RET"), nullptr, 16) : 0;
+            if (want_ret && *reinterpret_cast<uint64_t*>(g[REG_RSP]) - reinterpret_cast<uint64_t>(main_image().base) != want_ret)
+                early = true;
+            int c = early ? repeat : lo < 512 ? counts[lo]++ : repeat;
+            if (early) {  // re-arm without logging
+                *reinterpret_cast<volatile uint8_t*>(at) = b.orig;
+                g[REG_RIP] = at;
+                rearm_at = at;
+                g[REG_EFL] |= 0x100;
+                return;
+            }
             // FL_BREAK_RBXSTR=<off>: a C string at rbx + off.
             if (c < repeat && getenv("FL_BREAK_RBXSTR") && g[REG_RBX] > 0x10000)
                 fl::log_write("break", "  rbx+%s cstr '%.200s'", getenv("FL_BREAK_RBXSTR"),
@@ -400,6 +439,55 @@ static void trap_handler(int, siginfo_t* si, void* uc_) {
                               reinterpret_cast<const char*>(g[REG_RCX] + strtoull(getenv("FL_BREAK_RCXSTR"), nullptr, 16)));
             if (c < repeat && getenv("FL_BREAK_CSTR") && g[REG_RCX] > 0x10000)
                 fl::log_write("break", "  rcx cstr '%.200s'", reinterpret_cast<const char*>(g[REG_RCX]));
+            // FL_BREAK_DEREF=<off> in repeat mode: the value at [rcx+off] (as a game rva if in the image).
+            if (c < repeat && getenv("FL_BREAK_DEREF") && g[REG_RCX] > 0x10000) {
+                uint64_t v = *reinterpret_cast<uint64_t*>(g[REG_RCX] + strtoull(getenv("FL_BREAK_DEREF"), nullptr, 16));
+                uint64_t base = reinterpret_cast<uint64_t>(main_image().base);
+                fl::log_write("break", "  [rcx+%s] = %llx (rva 0x%llx)", getenv("FL_BREAK_DEREF"), (unsigned long long)v,
+                              (unsigned long long)(v - base));
+            }
+            // FL_BREAK_DUMP=<off>:<len>[,<off>:<len>...] (hex): bytes at rcx+off; an offset
+            // written as *<off1>+<off2> follows the pointer at rcx+off1 first.
+            if (c < repeat && getenv("FL_BREAK_DUMP") && g[REG_RCX] > 0x10000) {
+                for (const char* p = getenv("FL_BREAK_DUMP"); *p;) {
+                    uint64_t addr = g[REG_RCX];
+                    bool indirect = *p == '*';
+                    if (indirect) p++;
+                    uint64_t off = strtoull(p, const_cast<char**>(&p), 16);
+                    if (indirect) {
+                        addr = *reinterpret_cast<uint64_t*>(addr + off);
+                        off = *p == '+' ? strtoull(p + 1, const_cast<char**>(&p), 16) : 0;
+                    }
+                    uint64_t len = *p == ':' ? strtoull(p + 1, const_cast<char**>(&p), 16) : 8;
+                    char hex[3 * 64 + 1] = "";
+                    if (addr > 0x10000)
+                        for (uint64_t i = 0; i < len && i < 64; i++)
+                            snprintf(hex + 3 * i, 4, "%02x ", reinterpret_cast<const uint8_t*>(addr + off)[i]);
+                    fl::log_write("break", "  dump %llx+%llx: %s", (unsigned long long)addr, (unsigned long long)off, hex);
+                    if (*p == ',') p++;
+                    else break;
+                }
+            }
+            // FL_BREAK_PTRVEC=<off>:<stride> (hex): for the vector [rcx+off, rcx+off+8)
+            // of objects (or shared_ptrs, stride 0x10), the vtable rva of each element.
+            if (c < repeat && getenv("FL_BREAK_PTRVEC") && g[REG_RCX] > 0x10000) {
+                const char* p = getenv("FL_BREAK_PTRVEC");
+                uint64_t off = strtoull(p, const_cast<char**>(&p), 16);
+                uint64_t stride = *p == ':' ? strtoull(p + 1, nullptr, 16) : 8;
+                auto* v = reinterpret_cast<uint64_t*>(g[REG_RCX] + off);
+                uint64_t base = reinterpret_cast<uint64_t>(main_image().base);
+                for (uint64_t e = v[0], i = 0; e < v[1] && i < 32; e += stride, i++) {
+                    uint64_t obj = *reinterpret_cast<uint64_t*>(e);
+                    uint64_t vt = obj > 0x10000 ? *reinterpret_cast<uint64_t*>(obj) : 0;
+                    fl::log_write("break", "  [%llu] %llx vtable rva 0x%llx", (unsigned long long)i, (unsigned long long)obj,
+                                  (unsigned long long)(vt ? vt - base : 0));
+                }
+            }
+            // FL_BREAK_RDXF=1: the 4 floats at rdx (a float4 passed by pointer).
+            if (c < repeat && getenv("FL_BREAK_RDXF") && g[REG_RDX] > 0x10000) {
+                auto* f = reinterpret_cast<const float*>(g[REG_RDX]);
+                fl::log_write("break", "  [rdx] floats %g %g %g %g", f[0], f[1], f[2], f[3]);
+            }
             if (c < repeat && getenv("FL_BREAK_STR") && g[REG_RDX] > 0x10000) {
                 // rdx as an MSVC std::string: {buf[16] or ptr, size, capacity}
                 auto* sp = reinterpret_cast<const uint64_t*>(g[REG_RDX]);

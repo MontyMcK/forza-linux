@@ -1,5 +1,6 @@
 // Shared device-child plumbing: private data, the DXVK<->wrapper registry and
 // the ID3D11DeviceChild base slots.
+#include <mutex>
 #include <cstdlib>
 #include <cstring>
 #include <set>
@@ -192,6 +193,24 @@ Resource::Resource(const char16_t* name, DeviceX* dev, winrt::Vtable& vt, void* 
     : DeviceChild(name, dev, vt, dxvk_obj), dim(dimension), xdesc_size(desc_size) {
     std::memcpy(xdesc, desc, desc_size);
     expose(IID_ID3D11Resource, &iface);
+}
+
+namespace {
+std::mutex g_hash_mutex;
+std::unordered_map<void*, uint64_t> g_shader_hash;
+}  // namespace
+void note_shader_hash(void* dxvk_shader, uint64_t hash) {
+    std::lock_guard lock(g_hash_mutex);
+    g_shader_hash[dxvk_shader] = hash;
+}
+uint64_t shader_hash(void* dxvk_shader) {
+    std::lock_guard lock(g_hash_mutex);
+    auto it = g_shader_hash.find(dxvk_shader);
+    return it == g_shader_hash.end() ? 0 : it->second;
+}
+
+Resource::~Resource() {
+    if (place) placement_forget(this);
 }
 
 }  // namespace fl::d3d

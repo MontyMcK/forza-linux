@@ -179,3 +179,15 @@ Did:
 - Testing note: test boots now let the Anthem_Tone_Video play (the user asked to remove variables); FL_DEV_SKIP_MOVIES stays OFF in the repo.
 
 Next step: find what zeroes the tonemap output: emulate the PS (research/private/shaders/tonemap.spvasm) on one pixel with the traced inputs, or bisect by forcing branches (e.g. a debug env that binds a known texture as t6/t3). Then the black G-buffer geometry.
+
+## 2026-10-26 (evening): Claude: why the screen was black; past the intro into the world (with a debug override)
+
+Found:
+- The tonemap output was black because its colour matrix (cb1 c14-c16) is 0: the **camera fade** is (0,0,0,1) (ForzaMultiCam → CameraFadeComponent). The intro state flow (media/stateflow.zip, free_roam_start_ie.xml `hero_car_flow`) never reaches `fade_in`: it waits in `WaitForCutsceneLoaded` for the `jetty_transition` cutscene, whose **CinematicAudioEvent** never becomes ready: its AudioObjectOneShotFmod needs FMOD `EventInstance::getStreamLoadingState` == LOADED (3), and a DialogStatus never leaves state 0. FMOD streams on Xbox One go through the SHAPE/XMA hardware we don't emulate, so they never load. (Evidence and RVAs: FINDINGS §4.)
+- With that one check forced (`FL_BREAK=0x17469a0 FL_BREAK_RETURN=0x17469a0=1`, debug only) the game plays IE_opening.bk2, fades in and reaches the festival world with the Huracán; the pause menu works (the user saw it). Lit geometry is still black (separate bug).
+- Compact commands (context slot 209) are variable length: header bits 0-7 are an entry count; header & 0x0fff0000 == 0x01060000 with kind 1 binds vertex buffers (extra = stride << 48 | offset). Fixed from Azimuth's decoder (rva 0x1cbc80).
+- Placement resources created twice at one address with the same descriptor now share one wrapper (the 4x MSAA depth target is created twice).
+
+Tools: `FL_BREAK_RETURN=<rva>=<value>` (forced return), `FL_BREAK_AFTER=<s>`, `FL_BREAK_RET=<rva>` (filter by return address), `FL_BREAK_DUMP=<off>:<len>|*<off>+<off>:<len>`, `FL_BREAK_PTRVEC=<off>:<stride>`, `FL_BREAK_RDXF=1`, `FL_BREAK_DEREF` in repeat mode; `FL_DEBUG_NULL_SRV=<ps fnv>:<slots>`; trace logs ClearDepthStencilView.
+
+Next step: make FMOD XMA streams load and play: emulate SHAPE XMA contexts (FMOD's "FMOD XMA Codec"; Azimuth: XmaVoice/XmaDecoder, FFmpeg) with an FFmpeg built with the xma2 decoder (Fedora's lacks it). Then the black lit geometry.

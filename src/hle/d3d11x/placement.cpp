@@ -16,6 +16,8 @@
 #include "hle/registry.h"
 #include "hle/xg/xg.h"
 
+#include <mutex>
+#include <unordered_map>
 #include <vector>
 
 namespace fl::d3d {
@@ -27,8 +29,36 @@ namespace dc = desktop::ctx;
 
 constexpr UINT kGpuWriteBinds = 0x20 | 0x40 | 0x80;  // RENDER_TARGET | DEPTH_STENCIL | UNORDERED_ACCESS
 
+// Live placement resources by address. On the console two placement
+// resources over the same memory ARE the same memory; the game creates the
+// 4x MSAA depth target twice at one address (one object to render depth into,
+// one to read it back in compute, game rva 0x10d8... at boot). Separate DXVK
+// textures would never see each other's contents, so an identical
+// descriptor at an address that already has a live resource gets that
+// resource (another reference) instead of a new copy.
+std::mutex g_placed_mutex;
+std::unordered_map<uintptr_t, Resource*> g_placed;
+
+Resource* find_identical(int dim, const uint32_t* xd, size_t xd_size, UINT tile_mode, UINT pitch, void* addr) {
+    std::lock_guard lock(g_placed_mutex);
+    auto it = g_placed.find(reinterpret_cast<uintptr_t>(addr));
+    if (it == g_placed.end()) return nullptr;
+    Resource* r = it->second;
+    if (r->magic != DeviceChild::kMagic || r->dim != dim || r->tile_mode != tile_mode || r->pitch != pitch ||
+        r->xdesc_size != xd_size || std::memcmp(r->xdesc, xd, xd_size) != 0)
+        return nullptr;
+    r->add_ref();
+    return r;
+}
+
 HRESULT create_placement(Iface* self, int dim, const uint32_t* xd, UINT tile_mode, UINT pitch, void* addr,
                          void** out) {
+    size_t xd_size = dim == 1 ? 0x20 : dim == 2 ? 0x28 : dim == 3 ? 0x34 : 0x2c;  // Xbox descriptor sizes (resources.cpp)
+    if (Resource* same = out ? find_identical(dim, xd, xd_size, tile_mode, pitch, addr) : nullptr) {
+        FL_LOG(d3d, "placement dim %d at %p: same descriptor as live %p, sharing it", dim, addr, (void*)same);
+        *out = &same->iface;
+        return S_OK;
+    }
     Resource* r = nullptr;
     HRESULT hr = create_resource(self->as<DeviceX>(), dim, xd, nullptr, out, true, &r);
     if (hr < 0 || !r) return hr;
@@ -57,6 +87,10 @@ HRESULT create_placement(Iface* self, int dim, const uint32_t* xd, UINT tile_mod
     }
     FL_LOG(d3d, "placement dim %d at %p size 0x%zx tile %u pitch %u bind 0x%x", dim, addr, r->place_size, tile_mode,
            pitch, bind);
+    {
+        std::lock_guard lock(g_placed_mutex);
+        g_placed[reinterpret_cast<uintptr_t>(addr)] = r;  // the newest resource at an address owns it
+    }
     return hr;
 }
 
@@ -169,6 +203,12 @@ void sync_placement(void* dxvk_ctx, Resource* r) {
                      static_cast<const void*>(linear.data()), static_cast<UINT>(row), static_cast<UINT>(slice));
         }
     }
+}
+
+void placement_forget(Resource* r) {
+    std::lock_guard lock(g_placed_mutex);
+    auto it = g_placed.find(reinterpret_cast<uintptr_t>(r->place));
+    if (it != g_placed.end() && it->second == r) g_placed.erase(it);
 }
 
 void add_placement_methods(Vtable& v) {

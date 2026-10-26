@@ -8,6 +8,7 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "common/log.h"
 #include "hle/d3d11x/trace.h"
@@ -261,8 +262,36 @@ WINAPI void ctx_DrawIndexed(void* self, uint64_t start_count, INT base) {
     dx<void>(ctxdx(self), dc::DrawIndexed, count, start, base);
     trace::after_draw(ctxdx(self));
 }
+// FL_DEBUG_NULL_SRV=<ps fnv hex>:<slot>[,<slot>...] (bisect aid): unbind those
+// pixel-shader resources right before every Draw with that pixel shader
+// (hash from FL_LOG=shaders).
+void debug_null_srvs(void* dxctx) {
+    static const char* env = getenv("FL_DEBUG_NULL_SRV");
+    if (!env) return;
+    static uint64_t want = strtoull(env, nullptr, 16);
+    static std::vector<UINT> slots = [] {
+        std::vector<UINT> v;
+        const char* p = strchr(env, ':');
+        while (p && *++p) {
+            v.push_back(static_cast<UINT>(strtoul(p, const_cast<char**>(&p), 10)));
+            if (*p != ',') break;
+        }
+        return v;
+    }();
+    void* ps = nullptr;
+    dx<void>(dxctx, dc::PSGetShader, &ps, nullptr, nullptr);
+    if (!ps) return;
+    bool match = shader_hash(ps) == want;
+    dx_release(ps);
+    if (!match) return;
+    void* none = nullptr;
+    for (UINT slot : slots) dx<void>(dxctx, dc::PSSetShaderResources, slot, 1u, &none);
+    log_once("FL_DEBUG_NULL_SRV: unbound pixel-shader resources", want);
+}
+
 WINAPI void ctx_Draw(void* self, UINT count, UINT start) {
     apply_inline_state(C::from(self));
+    debug_null_srvs(ctxdx(self));
     trace::draw(ctxdx(self), "Draw", count, start);
     dx<void>(ctxdx(self), dc::Draw, count, start);
     trace::after_draw(ctxdx(self));
@@ -388,6 +417,13 @@ WINAPI void ctx_ClearUnorderedAccessViewFloat(void* self, void* uav, const float
     dx<void>(ctxdx(self), dc::ClearUnorderedAccessViewFloat, unwrap(uav), values);
 }
 WINAPI void ctx_ClearDepthStencilView(void* self, void* dsv, UINT flags, float depth, uint8_t stencil) {
+    if (trace::active()) {
+        void* res = nullptr;
+        if (dsv) dx<void>(unwrap(dsv), 7 /* ID3D11View::GetResource */, &res);
+        trace::event("ClearDepthStencilView [%s] flags %u depth %g stencil %u",
+                     std::string(trace::describe_dxvk(res)).c_str(), flags, depth, stencil);
+        if (res) dx_release(res);
+    }
     dx<void>(ctxdx(self), dc::ClearDepthStencilView, unwrap(dsv), flags, depth, stencil);
 }
 WINAPI void ctx_GenerateMips(void* self, void* srv) { dx<void>(ctxdx(self), dc::GenerateMips, unwrap(srv)); }
@@ -646,17 +682,14 @@ WINAPI void ctx_FastBind(void* self, UINT slot, void* obj) {
 
 // ---- Xbox slot 209: compact binding commands ----
 // With bit 0 of ctx+0x390 set, the game's inlined raw command-buffer writers
-// send these instead (FINDINGS §3.1). Each command is 20 bytes:
-//   u32 op: bit 31 = bind, bits 28-30 = kind (0 SRV, 1 CB, 2 sampler),
-//           bits 16-19 = stage (0 VS, 1 HS, 2 DS, 3 GS, 4 PS, 5 CS), bits 8-15 = slot, bits 0-7 = 1
-//   u64 object (our wrapper), u64 extra (0 at every call site seen)
-struct __attribute__((packed)) CompactCmd {
-    uint32_t op;
-    uint64_t obj;
-    uint64_t extra;
-};
-static_assert(sizeof(CompactCmd) == 20);
-
+// send these instead (FINDINGS §3.1). A command is a u32 header followed by
+// `count` 16-byte entries {u64 object (our wrapper), u64 extra}:
+//   bit 31 = bind (always set), bits 28-30 = kind (0 SRV, 1 CB, 2 sampler),
+//   bits 16-19 = stage (0 VS, 1 HS, 2 DS, 3 GS, 4 PS, 5 CS), bits 8-15 = first
+//   slot, bits 0-7 = count (1..32). Header & 0x0fff0000 == 0x01060000 with kind
+//   1 binds VERTEX BUFFERS instead: extra = stride << 48 | offset.
+// Layout as Azimuth's decoder (its rva 0x1cbc80) checks it; other kinds have
+// extra 0.
 void bind_one(void* ctx, int stage, int kind, UINT slot, void* obj) {
     static const int cb[6] = {dc::VSSetConstantBuffers, dc::HSSetConstantBuffers, dc::DSSetConstantBuffers,
                               dc::GSSetConstantBuffers, dc::PSSetConstantBuffers, dc::CSSetConstantBuffers};
@@ -670,15 +703,38 @@ void bind_one(void* ctx, int stage, int kind, UINT slot, void* obj) {
 }
 
 WINAPI void ctx_ExecuteCompactCommands(void* self, const uint8_t* begin, const uint8_t* end) {
-    for (const uint8_t* p = begin; p < end; p += sizeof(CompactCmd)) {
-        CompactCmd cmd;
-        std::memcpy(&cmd, p, sizeof(cmd));
-        uint32_t type = cmd.op & 0xff, slot = (cmd.op >> 8) & 0xff, stage = (cmd.op >> 16) & 0xf;
-        uint32_t kind = (cmd.op >> 28) & 7, bind = cmd.op >> 31, rest = (cmd.op >> 20) & 0xff;
-        if (type != 1 || !bind || kind > 2 || stage > 5 || rest || cmd.extra)
-            fatal("d3d: unknown compact command op=0x%08x obj=0x%llx extra=0x%llx (ctx slot 209)", cmd.op,
-                  (unsigned long long)cmd.obj, (unsigned long long)cmd.extra);
-        bind_one(ctxdx(self), stage, kind, slot, reinterpret_cast<void*>(cmd.obj));
+    void* ctx = ctxdx(self);
+    for (const uint8_t* p = begin; p + 4 <= end;) {
+        uint32_t op;
+        std::memcpy(&op, p, 4);
+        uint32_t count = op & 0xff, slot = (op >> 8) & 0xff, stage = (op >> 16) & 0xf, kind = (op >> 28) & 7;
+        bool vertex_buffers = (op & 0x0fff0000) == 0x01060000 && kind == 1;
+        if (!(op >> 31) || count == 0 || count > 32 || kind > 2 || p + 4 + count * 16 > end ||
+            (!vertex_buffers && ((op & 0x0ff00000) || stage > 5)))
+            fatal("d3d: unknown compact command header 0x%08x (ctx slot 209)", op);
+        const uint8_t* e = p + 4;
+        if (vertex_buffers) {
+            void* bufs[32];
+            UINT strides[32], offsets[32];
+            for (uint32_t i = 0; i < count; i++) {
+                uint64_t obj, extra;
+                std::memcpy(&obj, e + i * 16, 8);
+                std::memcpy(&extra, e + i * 16 + 8, 8);
+                bufs[i] = bind_unwrap(ctx, reinterpret_cast<void*>(obj));
+                strides[i] = static_cast<UINT>(extra >> 48);
+                offsets[i] = static_cast<UINT>(extra & 0xffffffffffffull);
+            }
+            dx<void>(ctx, dc::IASetVertexBuffers, slot, count, bufs, strides, offsets);
+        } else {
+            for (uint32_t i = 0; i < count; i++) {
+                uint64_t obj, extra;
+                std::memcpy(&obj, e + i * 16, 8);
+                std::memcpy(&extra, e + i * 16 + 8, 8);
+                if (extra) fatal("d3d: compact command 0x%08x entry %u has extra 0x%llx", op, i, (unsigned long long)extra);
+                bind_one(ctx, stage, kind, slot + i, reinterpret_cast<void*>(obj));
+            }
+        }
+        p = e + count * 16;
     }
 }
 

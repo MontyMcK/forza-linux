@@ -90,6 +90,7 @@ WINAPI HRESULT d3d_QueryInterface(winrt::Iface* self, const GUID& iid, void** ou
 struct Resource : DeviceChild {
     Resource(const char16_t* name, DeviceX* dev, winrt::Vtable& vt, void* dxvk_obj, int dim, const void* xdesc,
              size_t xdesc_size);
+    ~Resource() override;
     Resource* backing() override { return this; }
     int dim;                 // D3D11_RESOURCE_DIMENSION: 1 buffer, 2 tex1d, 3 tex2d, 4 tex3d
     uint8_t xdesc[0x40] = {};  // the game's Xbox descriptor (returned by GetDesc)
@@ -117,6 +118,8 @@ void* make_adapter(void* dxvk_adapter);      // dxgi.cpp: wraps an IDXGIAdapter
 // Copy a placement resource's game memory to DXVK if it changed. Called when
 // the resource is bound. Cheap when nothing changed.
 void sync_placement(void* dxvk_ctx, Resource* r);
+// A placement resource is going away: forget it as the owner of its address.
+void placement_forget(Resource* r);
 inline void sync_for_gpu(void* dxvk_ctx, DeviceChild* c) {
     if (Resource* r = c ? c->backing() : nullptr)
         if (r->place) sync_placement(dxvk_ctx, r);
@@ -172,6 +175,10 @@ void add_dma_methods(winrt::Vtable& device_vt);       // dma.cpp
 void add_placement_methods(winrt::Vtable& device_vt); // placement.cpp
 void add_context_methods(void** table);               // context.cpp
 ContextX* make_context(DeviceX* d, void* dxvk_ctx, bool deferred);  // context.cpp
+
+// FL_DEBUG_NULL_SRV support: the bytecode hash (FNV-1a) of a DXVK shader.
+void note_shader_hash(void* dxvk_shader, uint64_t hash);
+uint64_t shader_hash(void* dxvk_shader);
 
 // Log a value once per (what, value) pair.
 void log_once(const char* what, uint64_t value);

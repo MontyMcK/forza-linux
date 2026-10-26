@@ -1,6 +1,6 @@
 # Plan: Forza Horizon 2 (Xbox One) running natively on Linux
 
-**Current phase: Phase 5, the 3D frame.** The game loads the world after the title and renders ~900 draws a frame without crashing; with draw-bundle inheritance the 3D scene renders (visible in frame-trace dumps), but the final image is still black because the tonemap pass outputs 0 (task below). Earlier state: The game boots through the intro movies to a correct **title screen** (Bink background video, logo, A-button glyph; milestone (b)) with DualSense/keyboard input and the real FMOD engine (banks load; SHAPE/XMA voices still silent). Pressing A creates a profile in ConnectedStorage, goes through offline Live, and starts loading; the loader now drives the DMA engine context (PLAN 5b). (Update this line whenever a phase completes.)
+**Current phase: Phase 6, audio (XMA streams block the intro).** With the cutscene-audio wait forced by a debug breakpoint the game fades in and reaches the festival world and its pause menu; lit geometry is still black. Previously: **Phase 5, the 3D frame.** The game loads the world after the title and renders ~900 draws a frame without crashing; with draw-bundle inheritance the 3D scene renders (visible in frame-trace dumps), but the final image is still black because the tonemap pass outputs 0 (task below). Earlier state: The game boots through the intro movies to a correct **title screen** (Bink background video, logo, A-button glyph; milestone (b)) with DualSense/keyboard input and the real FMOD engine (banks load; SHAPE/XMA voices still silent). Pressing A creates a profile in ConnectedStorage, goes through offline Live, and starts loading; the loader now drives the DMA engine context (PLAN 5b). (Update this line whenever a phase completes.)
 
 ## The big idea (read before writing any code)
 
@@ -169,7 +169,7 @@ The hardest phase. The order matters.
 - [x] Depth+stencil XG layouts: [HTILE] DEPTH [STENCIL] with xg_x's usages and HTILE size (FINDINGS §3.2).
 - [ ] XG colour render targets: CMASK (+FMASK) planes after the colour plane (xg_x rva 0x1770, FUN_180005220); STUB today.
 - [x] **Draw bundles:** deferred contexts created with flag bit 17 inherit the executing context's state: DXVK patch tools/dxvk-patches/0001-xbox-draw-bundles.patch (FINDINGS §5b). The 3D scene now renders.
-- [ ] **Tonemap writes 0 (blocks the picture):** the last full-screen pass outputs exactly 0 although its inputs look sane (LOG 2026-10-26 later, FINDINGS §5b post-processing chain). Suspect a NaN (motion-blur branch) or one unchecked input.
+- [x] **Tonemap writes 0:** not a rendering bug: the camera fade stays black because the intro waits for FMOD streams (FINDINGS §4). With the wait forced (debug) the game fades in and reaches the world.
 - [ ] Deferred/G-buffer geometry: lit objects are black silhouettes and the main depth reads 1.0 at post-processing.
 - [ ] ESRAM aliasing: resources share ESRAM offsets (FINDINGS §5b); find out whether any pass reads through an alias what another wrote.
 - [ ] Untiler speed: per-element addrlib calls are fine for BC textures, slow for big uncompressed ones; cache the per-macro-tile pattern.
@@ -198,6 +198,7 @@ Azimuth runs the game because the GPU reads the game's memory directly. Our copy
 
 - [x] `ActivateAudioInterfaceAsync` → our `IAudioClient2`/`IAudioRenderClient`/`IAudioClock`, backed by an SDL3 audio stream (48 kHz float stereo, PipeWire). FMOD's output path (FINDINGS §4). `FL_AUDIO=null` drops audio.
 - [x] AcpHal heaps, SHAPE context arrays, IAcpHal command/message queues with a 128-sample ACP clock (FINDINGS §4).
+- [ ] **Blocks the intro:** FMOD XMA streams must load (EventInstance::getStreamLoadingState == LOADED) or the IE cutscene never becomes ready (FINDINGS §4). Needs the SHAPE/XMA emulation below.
 - [ ] SHAPE flowgraph execution: decode the SHAPE commands FMOD puts in its 0x3000-byte flowgraph buffer and the 64-byte XMA contexts, then decode **XMA2** with FFmpeg's `xma2` decoder (Azimuth uses a modified FFmpeg: one stream per decoder, every frame output immediately; check whether Fedora's ffmpeg-free has xma2).
 - [ ] `xaudio2_9.dll` (dynamically loaded): provide it from the HLE registry via **FAudio**, which implements the XAudio2 API, if the game actually loads it.
 - [ ] Media Foundation `MFCreateSourceReaderFromURL`: find out what it plays. Stub or implement with FFmpeg.
