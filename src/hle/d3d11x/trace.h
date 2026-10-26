@@ -17,6 +17,14 @@ void draw(void* dxctx, const char* kind, uint32_t a, uint32_t b = 0, uint32_t c 
 // (and, first time each is seen, the draw's 2D textures) as PNGs in
 // screenshots/trace/.
 void after_draw(void* dxctx);
+// FL_LOG=firstwrite: the first copy/render-target bind/update that writes each
+// resource (DXVK pointers), to find who fills a texture.
+void note_write(const char* how, void* dst_dxvk, void* src_dxvk);
+void note_view_write(const char* how, void* view_dxvk);
+// FL_LOG=dispatch: one line per compute dispatch (shader, u0/u1, t0-t3), any frame.
+void log_dispatch(void* dxctx, uint32_t x, uint32_t y, uint32_t z);
+// After an ExecuteCommandList (FL_TRACE_DUMP_ECLS).
+void after_ecl(void* dxctx);
 // Any other event (printf-style).
 void event(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 // One-line description of a game resource/view interface or DXVK object.

@@ -7,8 +7,9 @@
 // 48 kHz) that consumes submitted commands and posts messages back.
 // Evidence and layouts: FINDINGS §4f.
 //
-// STUB: SHAPE flowgraphs (XMA decode, SRC, DMA...) are acknowledged but not
-// executed yet, so hardware-decoded (XMA) sounds are silent.
+// SHAPE flowgraphs (XMA decode -> SRC -> DMA into FMOD's rings) run in
+// shape.cpp; XMA is decoded with FFmpeg when tools/build_ffmpeg_xma.sh has
+// been run, otherwise consumed as silence (STUB).
 
 #include <sys/mman.h>
 
@@ -24,6 +25,7 @@
 
 #include "common/log.h"
 #include "common/winabi.h"
+#include "hle/acphal/shape.h"
 #include "hle/registry.h"
 
 namespace fl::acphal {
@@ -236,15 +238,18 @@ struct AcpMessage {
 static_assert(sizeof(AcpMessage) == 24);
 
 // Message types seen in FMOD's handler (game rva 0x19d4f40): 2 = flowgraph
-// completed (returns a submission credit), 0x10 = frame counter, 4/8/0x20/
-// 0x40/0x80 = errors it logs.
-constexpr uint32_t kMsgFlowgraphDone = 2;
+// completed (returns a submission credit; +8 flowgraph APU address), 4 = an
+// SRC voice ran out of XMA input (+8 SRC index, +0xc flowgraph), 0x10 = a
+// command with a non-zero context was processed (+8 command type, +0xc u64
+// context, +0x14 frame counter), 8/0x20/0x40/0x80 = errors it logs.
+constexpr uint32_t kMsgCommandDone = 0x10;
 
 // Commands (SubmitCommand type 1..0x1b) and payload sizes (AcpHal rva 0x14a4):
 // 1, 0x15..0x1b: 16 bytes; 2,3,5,7: 4; 4: none; 6,8: 64; 9..0xe: 12;
 // 0xf..0x12: 8; 0x13: 24; 0x14: 112.
 constexpr uint32_t kCmdFlowgraph = 1;    // {u32 numCommands, u32 flowgraphApu, u64 ?}
 constexpr uint32_t kCmdMessageMask = 2;  // {u32 mask of message types to deliver}
+constexpr uint32_t kCmdMessageUnmask = 3;  // {u32 mask of message types to stop delivering}
 
 size_t payload_size(uint32_t type) {
     if (type == 1 || (type >= 0x15 && type <= 0x1b)) return 16;
@@ -302,32 +307,45 @@ struct AcpHal {
         messages.push_back(msg);
     }
 
-    // One audio frame: execute what is pending. A flowgraph takes one frame.
+    // One audio frame: execute what is pending, in submission order. A
+    // flowgraph takes one frame. `id` is a scheduled frame (FMOD passes
+    // 0xffffffff = now) and `arg` a notification mode (FMOD passes 0).
     void tick() {
         std::lock_guard lock(m);
         frames++;
+        auto post_fn = [this](const shape::Message& msg) {
+            AcpMessage a;
+            memcpy(&a, &msg, sizeof a);
+            post(a);
+        };
         while (!commands.empty()) {
             Command c = commands.front();
             commands.pop_front();
-            if (c.type == kCmdMessageMask) {
-                memcpy(&msg_mask, c.payload, 4);
+            static std::atomic<bool> warned{false};
+            if ((c.id != 0xffffffff || c.arg) && !warned.exchange(true))
+                FL_ERROR("ACP: scheduled/notifying commands are not implemented, run now (type %u id 0x%x arg 0x%x)",
+                         c.type, c.id, c.arg);
+            bool graph = false;
+            if (c.type == kCmdMessageMask || c.type == kCmdMessageUnmask) {
+                uint32_t mask;
+                memcpy(&mask, c.payload, 4);
+                msg_mask = c.type == kCmdMessageMask ? msg_mask | mask : msg_mask & ~mask;
                 FL_LOG(audio, "ACP: message mask 0x%x", msg_mask);
-                continue;
-            }
-            if (c.type == kCmdFlowgraph) {
+            } else if (c.type == kCmdFlowgraph) {
                 uint32_t count, apu;
                 memcpy(&count, c.payload, 4);
                 memcpy(&apu, c.payload + 4, 4);
-                FL_STUB_ONCE("ACP: SHAPE flowgraphs are not executed (XMA voices are silent)");
-                FL_LOG(audio, "ACP: flowgraph %u commands @apu 0x%x (frame %llu)", count, apu,
-                       (unsigned long long)frames);
-                post({kMsgFlowgraphDone, {c.id, 0, 0, 0, 0}});
-                break;  // one flowgraph per audio frame
+                shape::run_graph(count, apu, post_fn);
+                graph = true;
+            } else if (!shape::command(c.type, c.payload)) {
+                static std::set<uint32_t> seen;
+                if (seen.insert(c.type).second)
+                    FL_ERROR("UNIMPLEMENTED ACP command type %u (id %u, context 0x%llx) - ignored", c.type, c.id,
+                             (unsigned long long)c.context);
             }
-            static std::set<uint32_t> seen;
-            if (seen.insert(c.type).second)
-                FL_ERROR("UNIMPLEMENTED ACP command type %u (id %u, context 0x%llx) - ignored", c.type, c.id,
-                         (unsigned long long)c.context);
+            if (c.context)
+                post({kMsgCommandDone, {0, c.type, uint32_t(c.context), uint32_t(c.context >> 32), shape::frame()}});
+            if (graph) break;  // one flowgraph per audio frame
         }
     }
 
@@ -424,6 +442,20 @@ WINAPI HRESULT AcpHalCreate_(AcpHal** out) {
 }
 
 }  // namespace
+
+const ShapeArrays& shape_arrays() {
+    static ShapeArrays a;
+    a = {static_cast<uint8_t*>(g_contexts.src), static_cast<uint8_t*>(g_contexts.dma), static_cast<uint8_t*>(g_contexts.xma),
+         g_contexts.num_src, g_contexts.num_dma, g_contexts.num_xma};
+    return a;
+}
+
+uint8_t* apu_va(uint32_t apu, uint32_t len) {
+    std::lock_guard lock(g_heap_lock);
+    for (auto& h : g_heaps)
+        if (h.contains_apu(apu) && uint64_t(apu - h.apu_base) + len <= h.size) return h.base + (apu - h.apu_base);
+    return nullptr;
+}
 
 HLE_EXPORT(acphal, ApuCreateHeap, ApuCreateHeap_);
 HLE_EXPORT(acphal, ApuAlloc, ApuAlloc_);

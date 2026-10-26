@@ -125,6 +125,7 @@ int topology_from_bits(uint64_t bits) {
 }
 
 void apply_inline_state(C* c) {
+    if (c->deferred) c->recorded_draws++;
     uint64_t bits = c->u64(C::kTopology);
     if (bits != c->applied_topology_bits && bits) {
         int topo = topology_from_bits(bits);
@@ -334,23 +335,38 @@ WINAPI void ctx_DrawInstanced(void* self, UINT count, uint64_t start_inst64, UIN
 }
 WINAPI void ctx_DrawAuto(void* self) {
     apply_inline_state(C::from(self));
+    trace::draw(ctxdx(self), "DrawAuto", 0);
     dx<void>(ctxdx(self), dc::DrawAuto);
+    trace::after_draw(ctxdx(self));
 }
 WINAPI void ctx_DrawIndexedInstancedIndirect(void* self, void* buf, UINT offset) {
     apply_inline_state(C::from(self));
-    dx<void>(ctxdx(self), dc::DrawIndexedInstancedIndirect, bind_unwrap(ctxdx(self), buf), offset);
+    void* b = bind_unwrap(ctxdx(self), buf);
+    trace::draw(ctxdx(self), "DrawIndexedInstancedIndirect", offset);
+    trace::event("    args [%s] +%u", trace::describe_dxvk(b), offset);
+    dx<void>(ctxdx(self), dc::DrawIndexedInstancedIndirect, b, offset);
+    trace::after_draw(ctxdx(self));
 }
 WINAPI void ctx_DrawInstancedIndirect(void* self, void* buf, UINT offset) {
     apply_inline_state(C::from(self));
-    dx<void>(ctxdx(self), dc::DrawInstancedIndirect, bind_unwrap(ctxdx(self), buf), offset);
+    void* b = bind_unwrap(ctxdx(self), buf);
+    trace::draw(ctxdx(self), "DrawInstancedIndirect", offset);
+    trace::event("    args [%s] +%u", trace::describe_dxvk(b), offset);
+    dx<void>(ctxdx(self), dc::DrawInstancedIndirect, b, offset);
+    trace::after_draw(ctxdx(self));
 }
 WINAPI void ctx_Dispatch(void* self, UINT x, UINT y, UINT z) {
     trace::draw(ctxdx(self), "Dispatch", x, y, z);
+    trace::log_dispatch(ctxdx(self), x, y, z);
     dx<void>(ctxdx(self), dc::Dispatch, x, y, z);
     trace::after_draw(ctxdx(self));
 }
 WINAPI void ctx_DispatchIndirect(void* self, void* buf, UINT offset) {
-    dx<void>(ctxdx(self), dc::DispatchIndirect, bind_unwrap(ctxdx(self), buf), offset);
+    void* b = bind_unwrap(ctxdx(self), buf);
+    trace::draw(ctxdx(self), "DispatchIndirect", offset);
+    trace::event("    args [%s] +%u", trace::describe_dxvk(b), offset);
+    dx<void>(ctxdx(self), dc::DispatchIndirect, b, offset);
+    trace::after_draw(ctxdx(self));
 }
 
 // ---- Map / copies / clears ----
@@ -360,6 +376,29 @@ struct MappedSubresource {
     UINT row_pitch;
     UINT depth_pitch;
 };
+
+// FL_LOG=cbwrite: what the game writes into 16-byte constant buffers.
+std::mutex g_cbw_mutex;
+std::unordered_map<DeviceChild*, void*> g_cbw_mapped;
+bool small_cb(DeviceChild* c) {
+    Resource* r = c ? c->backing() : nullptr;
+    return r && r->dim == 1 && r->desc32()[0] <= 64 && (r->desc32()[2] & 0x4);
+}
+void note_small_cb_map(DeviceChild* c, UINT type, void* data) {
+    if (!small_cb(c)) return;
+    std::lock_guard lock(g_cbw_mutex);
+    g_cbw_mapped[c] = data;
+    FL_LOG(cbwrite, "Map %p type %u", (void*)c, type);
+}
+void note_small_cb_unmap(DeviceChild* c) {
+    if (!small_cb(c)) return;
+    std::lock_guard lock(g_cbw_mutex);
+    auto it = g_cbw_mapped.find(c);
+    if (it == g_cbw_mapped.end()) return;
+    const float* f = static_cast<const float*>(it->second);
+    FL_LOG(cbwrite, "Unmap %p: %g %g %g %g", (void*)c, f[0], f[1], f[2], f[3]);
+    g_cbw_mapped.erase(it);
+}
 
 WINAPI HRESULT ctx_Map(void* self, void* res, UINT sub, UINT type, UINT flags, void* mapped) {
     if (type < 1 || type > 5) log_once("Map: Xbox-only map type", type);
@@ -375,6 +414,7 @@ WINAPI HRESULT ctx_Map(void* self, void* res, UINT sub, UINT type, UINT flags, v
     if (flags & ~0x100000u) log_once("Map: Xbox-only map flags", flags);
     if (trace::active()) trace::event("Map [%s] sub %u type %u", trace::describe_dxvk(unwrap(res)), sub, type);
     HRESULT hr = dx<HRESULT>(ctxdx(self), dc::Map, unwrap(res), sub, type, flags, mapped);
+    if (log_enabled("cbwrite") && hr >= 0) note_small_cb_map(child_of(res), type, static_cast<MappedSubresource*>(mapped)->data);
     if (hr < 0) {
         auto* r = static_cast<Resource*>(child_of(res));
         const uint32_t* d = reinterpret_cast<const uint32_t*>(r->xdesc);
@@ -386,6 +426,7 @@ WINAPI HRESULT ctx_Map(void* self, void* res, UINT sub, UINT type, UINT flags, v
 }
 WINAPI void ctx_Unmap(void* self, void* res, UINT sub) {
     if (Resource* r = child_of(res)->backing(); r && r->place) return;
+    if (log_enabled("cbwrite")) note_small_cb_unmap(child_of(res));
     dx<void>(ctxdx(self), dc::Unmap, unwrap(res), sub);
 }
 
@@ -397,29 +438,57 @@ WINAPI void ctx_CopySubresourceRegion(void* self, void* dst, UINT dst_sub, UINT 
     if (trace::active())
         trace::event("CopySubresourceRegion dst[%s] sub %u at %u,%u <- src sub %u", trace::describe_dxvk(unwrap(dst)),
                      dst_sub, x, y, src_sub);
+    trace::note_write("CopySubresourceRegion", unwrap(dst), s);
     dx<void>(ctxdx(self), dc::CopySubresourceRegion, unwrap(dst), dst_sub, x, y, z, s, src_sub, box);
 }
 WINAPI void ctx_CopySubresourceRegion1(void* self, void* dst, UINT dst_sub, UINT x, UINT y, UINT z, void* src,
                                        UINT src_sub, const void* box, UINT flags) {
-    dx<void>(ctxdx(self), dc::CopySubresourceRegion1, unwrap(dst), dst_sub, x, y, z, bind_unwrap(ctxdx(self), src),
-             src_sub, box, flags);
+    void* s = bind_unwrap(ctxdx(self), src);
+    trace::note_write("CopySubresourceRegion1", unwrap(dst), s);
+    dx<void>(ctxdx(self), dc::CopySubresourceRegion1, unwrap(dst), dst_sub, x, y, z, s, src_sub, box, flags);
 }
 WINAPI void ctx_CopyResource(void* self, void* dst, void* src) {
     void* s = bind_unwrap(ctxdx(self), src);
     if (trace::active())
         trace::event("CopyResource dst[%s] <- src[%s]", std::string(trace::describe_dxvk(unwrap(dst))).c_str(),
                      std::string(trace::describe_dxvk(s)).c_str());
+    trace::note_write("CopyResource", unwrap(dst), s);
     dx<void>(ctxdx(self), dc::CopyResource, unwrap(dst), s);
 }
+// UpdateSubresource on a CPU-written placement buffer: on the console the
+// update lands in the buffer's memory, which is the game's memory. Write it
+// there too, or the next upload from game memory (after a CPU write to the
+// buffer or to a neighbour on the same page) would put the old contents back.
+void write_through_placement(void* dst, const void* box, const void* data) {
+    DeviceChild* c = child_of(dst);
+    Resource* r = c ? c->backing() : nullptr;
+    if (!r || !r->place || r->gpu_owned || !data) return;
+    if (r->dim != 1) {
+        log_once("UNIMPLEMENTED UpdateSubresource of a placement texture: game memory not updated", r->dim);
+        return;
+    }
+    const uint32_t* b = static_cast<const uint32_t*>(box);  // D3D11_BOX: left, top, front, right, bottom, back
+    size_t lo = b ? b[0] : 0, hi = b ? b[3] : r->place_size;
+    if (hi > r->place_size || lo >= hi) return;
+    std::memcpy(r->place + lo, data, hi - lo);
+}
+
 WINAPI void ctx_UpdateSubresource(void* self, void* dst, UINT sub, const void* box, const void* data, UINT row,
                                   UINT depth) {
     if (trace::active()) trace::event("UpdateSubresource [%s] sub %u row %u", trace::describe_dxvk(unwrap(dst)), sub, row);
     FL_LOG(upload, "UpdateSubresource [%s] sub %u box %p row %u depth %u", trace::describe_dxvk(unwrap(dst)), sub, box, row,
            depth);
+    write_through_placement(dst, box, data);
+    trace::note_write("UpdateSubresource", unwrap(dst), nullptr);
+    if (log_enabled("cbwrite") && small_cb(child_of(dst)) && data) {
+        const float* f = static_cast<const float*>(data);
+        FL_LOG(cbwrite, "UpdateSubresource %p: %g %g %g %g", (void*)child_of(dst), f[0], f[1], f[2], f[3]);
+    }
     dx<void>(ctxdx(self), dc::UpdateSubresource, unwrap(dst), sub, box, data, row, depth);
 }
 WINAPI void ctx_UpdateSubresource1(void* self, void* dst, UINT sub, const void* box, const void* data, UINT row,
                                    UINT depth, UINT flags) {
+    write_through_placement(dst, box, data);
     dx<void>(ctxdx(self), dc::UpdateSubresource1, unwrap(dst), sub, box, data, row, depth, flags);
 }
 WINAPI void ctx_CopyStructureCount(void* self, void* dst, UINT offset, void* uav) {
@@ -446,7 +515,15 @@ WINAPI void ctx_ClearDepthStencilView(void* self, void* dsv, UINT flags, float d
     }
     dx<void>(ctxdx(self), dc::ClearDepthStencilView, unwrap(dsv), flags, depth, stencil);
 }
-WINAPI void ctx_GenerateMips(void* self, void* srv) { dx<void>(ctxdx(self), dc::GenerateMips, unwrap(srv)); }
+WINAPI void ctx_GenerateMips(void* self, void* srv) {
+    if (log_enabled("genmips")) {
+        void* res = nullptr;
+        if (srv) dx<void>(unwrap(srv), 7 /* ID3D11View::GetResource */, &res);
+        FL_LOG(genmips, "GenerateMips [%s]", trace::describe_dxvk(res));
+        if (res) dx_release(res);
+    }
+    dx<void>(ctxdx(self), dc::GenerateMips, unwrap(srv));
+}
 WINAPI void ctx_SetResourceMinLOD(void* self, void* res, float lod) {
     // STUB: DXVK ignores SetResourceMinLOD (the game clamps per view, slot 223).
     log_once("STUB: SetResourceMinLOD is ignored by DXVK", 0);
@@ -469,9 +546,17 @@ WINAPI void ctx_ClearView(void* self, void* view, const float* color, const void
 WINAPI void ctx_Begin(void* self, void* async) { dx<void>(ctxdx(self), dc::Begin, unwrap(async)); }
 WINAPI void ctx_End(void* self, void* async) { dx<void>(ctxdx(self), dc::End, unwrap(async)); }
 WINAPI HRESULT ctx_GetData(void* self, void* async, void* data, UINT size, UINT flags) {
-    return dx<HRESULT>(ctxdx(self), dc::GetData, unwrap(async), data, size, flags);
+    HRESULT hr = dx<HRESULT>(ctxdx(self), dc::GetData, unwrap(async), data, size, flags);
+    if (log_enabled("query")) {
+        uint64_t v = 0;
+        if (hr == S_OK && data) std::memcpy(&v, data, std::min<UINT>(size, 8));
+        FL_LOG(query, "GetData(dxvk %p, %u B, flags 0x%x) -> 0x%x value 0x%llx", unwrap(async), size, flags,
+               static_cast<uint32_t>(hr), (unsigned long long)v);
+    }
+    return hr;
 }
 WINAPI void ctx_SetPredication(void* self, void* pred, BOOL value) {
+    FL_LOG(query, "SetPredication(dxvk %p, %d)", unwrap(pred), value);
     dx<void>(ctxdx(self), dc::SetPredication, unwrap(pred), value);
 }
 WINAPI void ctx_GetPredication(void* self, void** pred, BOOL* value) {
@@ -481,14 +566,49 @@ WINAPI void ctx_GetPredication(void* self, void** pred, BOOL* value) {
 
 // ---- Output merger / rasterizer / stream out ----
 
+// A bundle's render target / depth binds: shadow state only (see ContextX::bundle).
+void set_bundle_targets(C* c, UINT n, void* const* rtvs, void* dsv) {
+    for (UINT i = 0; i < 8; i++) {
+        DeviceChild* v = rtvs && i < n ? child_of(rtvs[i]) : nullptr;
+        if (v) v->add_ref();
+        if (c->shadow_rtv[i]) c->shadow_rtv[i]->release();
+        c->shadow_rtv[i] = v;
+    }
+    DeviceChild* d = child_of(dsv);
+    if (d) d->add_ref();
+    if (c->shadow_dsv) c->shadow_dsv->release();
+    c->shadow_dsv = d;
+}
+void get_bundle_targets(C* c, UINT n, void** rtvs, void** dsv) {
+    for (UINT i = 0; rtvs && i < n; i++) {
+        DeviceChild* v = i < 8 ? c->shadow_rtv[i] : nullptr;
+        if (v) v->add_ref();
+        rtvs[i] = v ? &v->iface : nullptr;
+    }
+    if (dsv) {
+        if (c->shadow_dsv) c->shadow_dsv->add_ref();
+        *dsv = c->shadow_dsv ? &c->shadow_dsv->iface : nullptr;
+    }
+}
+
 WINAPI void ctx_OMSetRenderTargets(void* self, UINT n, void* const* rtvs, void* dsv) {
+    if (C* c = C::from(self); c->bundle) {
+        set_bundle_targets(c, n, rtvs, dsv);
+        return;
+    }
     Unwrapped u(ctxdx(self), rtvs, n);
+    for (UINT i = 0; i < n; i++) trace::note_view_write("render target", u.p[i]);
     dx<void>(ctxdx(self), dc::OMSetRenderTargets, n, u.p, unwrap(dsv));
 }
 WINAPI void ctx_OMSetRenderTargetsAndUnorderedAccessViews(void* self, UINT n_rtv, void* const* rtvs, void* dsv,
                                                           UINT uav_start, UINT n_uav, void* const* uavs,
                                                           const UINT* counts) {
     // D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL / D3D11_KEEP_UNORDERED_ACCESS_VIEWS are 0xffffffff.
+    if (C* c = C::from(self); c->bundle && n_rtv != 0xffffffffu) {
+        set_bundle_targets(c, n_rtv, rtvs, dsv);  // the UAVs are recorded (Azimuth packet kind 0xd)
+        n_rtv = 0xffffffffu;
+        if (n_uav == 0xffffffffu) return;
+    }
     Unwrapped ur(ctxdx(self), n_rtv == 0xffffffffu ? nullptr : rtvs, n_rtv == 0xffffffffu ? 0 : n_rtv);
     Unwrapped uu(ctxdx(self), n_uav == 0xffffffffu ? nullptr : uavs, n_uav == 0xffffffffu ? 0 : n_uav);
     dx<void>(ctxdx(self), dc::OMSetRenderTargetsAndUnorderedAccessViews, n_rtv,
@@ -502,12 +622,19 @@ WINAPI void ctx_OMSetDepthStencilState(void* self, void* state, UINT ref) {
     dx<void>(ctxdx(self), dc::OMSetDepthStencilState, unwrap(state), ref);
 }
 WINAPI void ctx_OMGetRenderTargets(void* self, UINT n, void** rtvs, void** dsv) {
+    if (C* c = C::from(self); c->bundle) return get_bundle_targets(c, n, rtvs, dsv);
     dx<void>(ctxdx(self), dc::OMGetRenderTargets, n, rtvs, dsv);
     rewrap_array(rtvs, n);
     if (dsv) *dsv = rewrap(*dsv);
 }
 WINAPI void ctx_OMGetRenderTargetsAndUnorderedAccessViews(void* self, UINT n_rtv, void** rtvs, void** dsv,
                                                           UINT uav_start, UINT n_uav, void** uavs) {
+    if (C* c = C::from(self); c->bundle) {
+        get_bundle_targets(c, n_rtv, rtvs, dsv);
+        dx<void>(ctxdx(self), dc::OMGetRenderTargetsAndUnorderedAccessViews, 0u, nullptr, nullptr, uav_start, n_uav, uavs);
+        rewrap_array(uavs, n_uav);
+        return;
+    }
     dx<void>(ctxdx(self), dc::OMGetRenderTargetsAndUnorderedAccessViews, n_rtv, rtvs, dsv, uav_start, n_uav, uavs);
     rewrap_array(rtvs, n_rtv);
     if (dsv) *dsv = rewrap(*dsv);
@@ -559,6 +686,7 @@ WINAPI void ctx_ClearState(void* self) {
     auto* c = C::from(self);
     dx<void>(c->dxvk, dc::ClearState);
     c->applied_topology_bits = 0;  // DXVK forgot the topology; re-apply on the next draw
+    if (c->bundle) set_bundle_targets(c, 0, nullptr, nullptr);
 }
 WINAPI void ctx_Flush(void* self) { dx<void>(ctxdx(self), dc::Flush); }
 // D3D11_DEVICE_CONTEXT_IMMEDIATE / _DEFERRED (umd's immediate context returns 0).
@@ -594,8 +722,13 @@ WINAPI HRESULT ctx_FinishCommandList(void* self, BOOL restore, void** out) {
     }
     void* list = nullptr;
     HRESULT hr = dx<HRESULT>(c->dxvk, dc::FinishCommandList, restore, out ? &list : nullptr);
+    static const bool trace_bundles = getenv("FL_TRACE_BUNDLES") != nullptr;
+    if (trace_bundles && !trace::active())
+        log_write("trace", "#finish deferred %p [ctx %p] -> list %p", self, c->dxvk, list);
     trace::event("FinishCommandList on deferred %p [ctx %p] -> list %p (hr 0x%x)", self, c->dxvk, list, static_cast<uint32_t>(hr));
     if (!restore) c->applied_topology_bits = 0;
+    if (!restore && c->bundle) set_bundle_targets(c, 0, nullptr, nullptr);  // the context state resets
+    c->recorded_draws = 0;
     if (hr < 0 || !out) {
         if (hr < 0) FL_ERROR("d3d: FinishCommandList failed: 0x%08x", static_cast<uint32_t>(hr));
         if (out) *out = nullptr;
@@ -634,8 +767,28 @@ WINAPI void ctx_ExecuteCommandList(void* self, void* list, BOOL restore) {
         if (dsv) dx_release(dsv);
         trace::log_targets(c->dxvk, "      ");
     }
+    // FL_TRACE_ECL_STATS=1 (traced frames, immediate context): pipeline
+    // statistics of each command list, to see where a bundle's geometry is lost.
+    static const bool ecl_stats = getenv("FL_TRACE_ECL_STATS") != nullptr;
+    void* q = nullptr;
+    if (ecl_stats && trace::active() && !c->deferred) {
+        UINT qd[2] = {4 /* D3D11_QUERY_PIPELINE_STATISTICS */, 0};
+        if (dx<HRESULT>(c->device->dxvk, desktop::dev::CreateQuery, qd, &q) >= 0) dx<void>(c->dxvk, dc::Begin, q);
+        else q = nullptr;
+    }
     dx<void>(c->dxvk, dc::ExecuteCommandList, unwrap(list), restore);
+    if (q) {
+        dx<void>(c->dxvk, dc::End, q);
+        uint64_t st[11] = {};
+        while (dx<HRESULT>(c->dxvk, dc::GetData, q, st, UINT(sizeof st), 0u) == 1 /* S_FALSE */) {
+        }
+        trace::event("    stats: IA verts %llu prims %llu | VS %llu | clip in %llu out %llu | PS %llu",
+                     (unsigned long long)st[0], (unsigned long long)st[1], (unsigned long long)st[2],
+                     (unsigned long long)st[5], (unsigned long long)st[6], (unsigned long long)st[7]);
+        dx_release(q);
+    }
     trace::after_draw(c->dxvk);
+    if (!c->deferred) trace::after_ecl(c->dxvk);
     if (!restore) c->applied_topology_bits = 0;  // DXVK cleared the state
 }
 WINAPI BOOL ctx_IsAnnotationEnabled(void* self) { return FALSE_; }
@@ -668,9 +821,38 @@ WINAPI uint64_t ctx_InsertFence(void*, UINT) {
 }
 WINAPI void ctx_InsertWaitOnFence(void*, UINT, uint64_t) {}                // 155: wait on a fence value
 // 156-159 Remap{ConstantBuffer,ShaderResource,Sampler,VertexBuffer}Inheritance
-// (dst stage, dst slot, src stage, src slot; game rva 0x11a7765 passes PS 13,
-// PS 13). The reference umd's four slots are all `ret 0`, so do nothing too.
-WINAPI void ctx_RemapInheritance(void*, UINT, UINT, UINT, UINT) {}
+// (dst stage, dst slot, src stage, src slot), stages as in compact commands
+// (0 VS, 1 HS, 2 DS, 3 GS, 4 PS, 5 CS). Inside a draw bundle: from here on,
+// slot (stage, slot) uses the executing context's binding of (src stage, src
+// slot) as it was when the bundle started (Azimuth records it as packet kind
+// 0xc, rva 0x12c0c0/0x12c230, and applies it at replay, rva 0x1c98f0). The
+// game passes per-object textures and constants this way: the executing
+// context binds them to CS slots, bundles remap them into PS t13-t23 and the
+// VS/PS constant slots 5/6/9/12, between draws. The reference umd's slots are
+// `ret 0` on the immediate context; there they do nothing.
+extern "C" void dxvk_xbox_remap_inheritance(void* ctx, UINT kind, UINT dst_stage, UINT dst_slot, UINT src_stage,
+                                            UINT src_slot);
+void dx_remap(C* c, UINT kind, UINT dst_stage, UINT dst_slot, UINT src_stage, UINT src_slot) {
+    dxvk_xbox_remap_inheritance(c->dxvk, kind, dst_stage, dst_slot, src_stage, src_slot);
+}
+template <int Kind>
+WINAPI void ctx_RemapInheritance(void* self, UINT stage, UINT slot, UINT src_stage, UINT src_slot) {
+    static const char* kKind[4] = {"CB", "SRV", "sampler", "VB"};
+    C* c = C::from(self);
+    FL_LOG(remap, "%s %p remap %s stage %u slot %u <- stage %u slot %u (after %u draws)",
+           c->bundle ? "bundle" : c->deferred ? "deferred" : "immediate", self, kKind[Kind], stage, slot, src_stage,
+           src_slot, c->recorded_draws);
+    if (!c->bundle) {
+        log_once("Remap*Inheritance outside a draw bundle (ignored), kind", Kind);
+        return;
+    }
+    static const UINT kDxvkStage[6] = {1 /* VS */, 3 /* HS */, 4 /* DS */, 2 /* GS */, 0 /* PS */, 5 /* CS */};
+    if (stage > 5 || src_stage > 5) {
+        log_once("Remap*Inheritance with a bad stage", stage << 8 | src_stage);
+        return;
+    }
+    dx_remap(c, Kind, kDxvkStage[stage], slot, kDxvkStage[src_stage], src_slot);
+}
 // 197: EVENT_WRITE of event `ev` (0x407 = CS_PARTIAL_FLUSH after dispatches).
 // 0x80000001 takes another umd path (0xa89b0) that we have not decoded.
 WINAPI void ctx_InsertGpuEvent(void*, int ev) {
@@ -899,7 +1081,10 @@ void add_context_methods(void** t) {
     set(153, &ctx_InsertWaitUntilIdle);
     set(154, &ctx_InsertFence);
     set(155, &ctx_InsertWaitOnFence);
-    for (int slot = 156; slot <= 159; slot++) set(slot, &ctx_RemapInheritance);
+    set(156, &ctx_RemapInheritance<0>);
+    set(157, &ctx_RemapInheritance<1>);
+    set(158, &ctx_RemapInheritance<2>);
+    set(159, &ctx_RemapInheritance<3>);
     set(196, &ctx_Slot196);
     set(197, &ctx_InsertGpuEvent);
     set(209, &ctx_ExecuteCompactCommands);

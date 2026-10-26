@@ -207,3 +207,24 @@ Found:
 - The car layer's D16 depth (tonemap t10) is never rendered to: no draw uses it, so the car is not drawn as a car; the black shape is in the main pass.
 
 Broken: near terrain missing; the car and pedestrians black; audio (XMA) silent, intro still needs `FL_BREAK=0x17469a0 FL_BREAK_RETURN=0x17469a0=1`.
+
+## 2026-10-27: Claude: the world renders (bundles), SHAPE runs, the intro needs no override
+
+Did:
+- **SHAPE emulation** (src/hle/acphal/shape.cpp, FINDINGS §4): AcpHal commands 5-8/0x10/0x13 and flowgraph opcodes 1/2/0x10 (XMA -> SRC -> DMA into FMOD's rings), messages 2/4/0x10 as Azimuth posts them. XMA is decoded with FFmpeg when `tools/build_ffmpeg_xma.sh` has been run (minimal LGPL libavcodec with xma1/xma2, signature-checked 7.1.1 tarball; **not built yet: the agent's sandbox refused to compile downloaded code, the user has to run the script**); otherwise packets are consumed at their real rate as silence (STUB). FMOD's streams now load: the intro cutscene plays and ends by itself, `FL_BREAK=0x17469a0 FL_BREAK_RETURN=0x17469a0=1` is no longer needed. Note: FFmpeg-backed decoding in shape.cpp is written but has never been compiled (guarded by FL_HAVE_FFMPEG_XMA; CMake does not set it yet).
+- **Bundles must not bind render targets**: track/car bundles are recorded with 1x1 dummy targets; Azimuth keeps bundle OMSetRenderTargets as shadow state only. ContextX::bundle + shadow targets. The car, roads and terrain appeared.
+- **Bundle inheritance remaps** (slots 156-159) implemented in DXVK (patch 0002 + `dxvk_xbox_remap_inheritance` export); tools/build_dxvk.sh now resets the submodule's src/ and applies the whole patch series when the last patch is not in place. Materials are now correct: the gameplay frame looks like Forza Horizon 2 (Huracán, AI GT-R, road, cliffs, walls, sea).
+- UpdateSubresource on CPU-written placement buffers also writes game memory (else a later re-upload restored old constants).
+- Tools: FL_LOG=remap/query/create, FL_CREATE_STACK_FMT, FL_TRACE_ECL_STATS (pipeline statistics per command list), FL_TRACE_DUMP_ECLS, FL_TRACE_BUNDLES=full (bundle draw state), indirect draws in the trace, shader names: research/private/shader_names.txt maps the FNV of every DXBC in the game's zips to its file (scratch script built it).
+- Testing: `FL_SKIP_MOVIES=Anthem_Tone_Video` (user's request, dev build only); gameplay starts at ~100 s / frame ~13000.
+
+- **Driving works**: `FL_AUTOPRESS` gained RT/LT/SteerL/SteerR and `T:Name/seconds` holds; with `118:RT/60` the Huracán drives off along the coast (smoke, rewind prompt after hitting the wall) at ~58 fps. Keyboard: W/S throttle/brake, A/D steer (src/platform/input.cpp).
+
+Broken / next: one building renders black (left of the start road); audio silent until FFmpeg is built (then compile FL_HAVE_FFMPEG_XMA and test decoding); the render thread spends ~half its time in write-tracking ioctls (gpumem::dirty / begin_upload); streaming re-reads some ranges.
+
+## 2026-10-27 (later): Claude: shadows were black — DXVK's SRV hazard unbinding
+
+The user saw every shadowed surface pitch black (also the "black building"). Chain: scene irradiance cube (t0, 32x32) black <- blended from probes that were black <- convolved from mip 3 of a 256x256 environment cube whose mips were never generated: the game's mip-chain CS binds the cube as a whole-resource SRV and a per-mip UAV at once, and DXVK unbinds the SRV (D3D11 hazard rules; the console has none). DXVK patch 0003 (no SRV hazards). Shadows now have sky fill; the building is lit.
+Tools: FL_LOG=dispatch (every compute dispatch, any frame), FL_LOG=firstwrite (first writer of each resource), FL_TRACE_RT_MATCH=<text> (full state of draws whose RT0 matches, any frame, plus a dump of what they wrote), FL_TRACE_DUMP_SLOTS=a-b, texture dumps of arrays/cubes at the view's mip, R32G32B32A32 decoding, FL_LOG=cbwrite (16-64 byte constant buffer Map/Update contents), FL_LOG=genmips, FL_LOG=create init-data dump. Separate save dir for tests: XDG_DATA_HOME=<scratch> (runs alongside the user's instance).
+Next: audio (FFmpeg build by the user), sky banding at the top of the frame, performance of write tracking.
+Open (reported by the user, 2026-10-27): (1) shadows flicker at the festival; (2) crash after ~615 s: 148 "PPL task's exception was never observed" from Microsoft.Xbox.Services.dll (rva 0x17092, XSAPI tasks failing offline) in one second, then SIGSEGV in a memmove inside fl::seh::unwind_to (dispatch.cpp) while unwinding one of them. Next: reproduce both (save in research: the user's save is past the intro, at the festival).

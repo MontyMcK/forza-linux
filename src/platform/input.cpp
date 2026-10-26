@@ -69,9 +69,13 @@ void keyboard(PadState* s) {
 
 // FL_AUTOPRESS="35:A,37.5:Menu,40:A" holds a button for 250 ms at those
 // seconds after start: lets test runs get past "press start" unattended.
+// "T:Name/D" holds it for D seconds; RT/LT are the triggers (fully pressed),
+// SteerL/SteerR the left stick (driving tests).
+enum : uint32_t { kAutoRT = 1u << 24, kAutoLT = 1u << 25, kAutoSteerL = 1u << 26, kAutoSteerR = 1u << 27 };
 struct AutoPress {
     double t;
     uint32_t bit;
+    double hold = 0.25;
 };
 const std::vector<AutoPress>& autopress() {
     static std::vector<AutoPress> v = [] {
@@ -81,7 +85,8 @@ const std::vector<AutoPress>& autopress() {
         static const struct { const char* name; uint32_t bit; } kNames[] = {
             {"A", kA}, {"B", kB}, {"X", kX}, {"Y", kY}, {"Menu", kMenu}, {"View", kView},
             {"Up", kDPadUp}, {"Down", kDPadDown}, {"Left", kDPadLeft}, {"Right", kDPadRight},
-            {"LB", kLeftShoulder}, {"RB", kRightShoulder}};
+            {"LB", kLeftShoulder}, {"RB", kRightShoulder}, {"RT", kAutoRT}, {"LT", kAutoLT},
+            {"SteerL", kAutoSteerL}, {"SteerR", kAutoSteerR}};
         std::string spec(env);
         size_t pos = 0;
         while (pos < spec.size()) {
@@ -92,8 +97,13 @@ const std::vector<AutoPress>& autopress() {
             if (colon == std::string::npos) continue;
             double t = atof(item.substr(0, colon).c_str());
             std::string name = item.substr(colon + 1);
+            double hold = 0.25;
+            if (size_t slash = name.find('/'); slash != std::string::npos) {
+                hold = atof(name.substr(slash + 1).c_str());
+                name = name.substr(0, slash);
+            }
             for (auto& n : kNames)
-                if (name == n.name) out.push_back({t, n.bit});
+                if (name == n.name) out.push_back({t, n.bit, hold});
         }
         log_write("platform", "FL_AUTOPRESS: %zu scripted presses", out.size());
         return out;
@@ -105,7 +115,7 @@ uint32_t autopress_buttons() {
     double now = SDL_GetTicksNS() / 1e9;
     uint32_t b = 0;
     for (auto& a : autopress())
-        if (now >= a.t && now < a.t + 0.25) b |= a.bit;
+        if (now >= a.t && now < a.t + a.hold) b |= a.bit;
     return b;
 }
 
@@ -134,7 +144,12 @@ PadState read_pad() {
         s.ry = -axis(p, SDL_GAMEPAD_AXIS_RIGHTY);
     }
     keyboard(&s);  // the keyboard works alongside a gamepad too
-    s.buttons |= autopress_buttons();
+    uint32_t auto_b = autopress_buttons();
+    if (auto_b & kAutoRT) s.right_trigger = 1;
+    if (auto_b & kAutoLT) s.left_trigger = 1;
+    if (auto_b & kAutoSteerL) s.lx = -1;
+    if (auto_b & kAutoSteerR) s.lx = 1;
+    s.buttons |= auto_b & 0xffffff;
     static uint32_t last = 0;
     if (s.buttons != last) {
         FL_LOG(input, "buttons 0x%x", s.buttons);

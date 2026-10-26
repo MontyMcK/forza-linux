@@ -13,6 +13,7 @@
 #include "common/log.h"
 #include "hle/d3d11x/d3d11x.h"
 #include "hle/d3d11x/dxvk.h"
+#include "hle/d3d11x/trace.h"
 
 namespace fl::d3d {
 namespace {
@@ -53,6 +54,7 @@ WINAPI void dma_CopyResource(Iface* self, void* dst, void* src, UINT flags) {
     void* ctx = dma_dxvk_context(self);
     DeviceChild* s = child_of(src);
     sync_for_gpu(ctx, s);
+    trace::note_write("DMA CopyResource", unwrap(dst), s->dxvk);
     dx<void>(ctx, desktop::ctx::CopyResource, unwrap(dst), s->dxvk);
 }
 // 10: CopySubresourceRegion(dst, dst_sub, x, y, z, src, src_sub, box, flags):
@@ -64,6 +66,7 @@ WINAPI void dma_CopySubresourceRegion(Iface* self, void* dst, UINT dst_sub, UINT
     void* ctx = dma_dxvk_context(self);
     DeviceChild* s = child_of(src);
     sync_for_gpu(ctx, s);
+    trace::note_write("DMA CopySubresourceRegion", unwrap(dst), s->dxvk);
     dx<void>(ctx, desktop::ctx::CopySubresourceRegion, unwrap(dst), dst_sub, x, y, z, s->dxvk, src_sub, box);
 }
 

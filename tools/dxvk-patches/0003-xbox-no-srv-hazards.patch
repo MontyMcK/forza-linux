@@ -1,0 +1,17 @@
+diff --git a/src/d3d11/d3d11_view_srv.h b/src/d3d11/d3d11_view_srv.h
+index 0446d4df..79472ffb 100644
+--- a/src/d3d11/d3d11_view_srv.h
++++ b/src/d3d11/d3d11_view_srv.h
+@@ -38,7 +38,11 @@ namespace dxvk {
+     }
+ 
+     BOOL TestHazards() const {
+-      return m_info.BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_UNORDERED_ACCESS);
++      // forza-linux: the Xbox runtime does not unbind shader resource views
++      // that overlap bound render targets or UAVs; the game relies on it
++      // (e.g. its cubemap mip-chain compute reads mip N-1 through a whole-
++      // resource SRV while writing mip N through a UAV). Never hazardous.
++      return FALSE;
+     }
+ 
+     D3D11_RESOURCE_DIMENSION GetResourceType() const {

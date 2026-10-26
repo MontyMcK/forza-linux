@@ -175,8 +175,10 @@ The hardest phase. The order matters.
   - [x] Write tracking lost writes to small buffers sharing a page (page → resources index, `force_dirty`).
   - [x] Bundles recorded stale placement uploads (re-sync at ExecuteCommandList).
   - [x] SetShaderResourceViewMinLOD (slot 223) emulated with a clamped view.
-  - [ ] **Near terrain is not drawn** (the world-edge mesh shows through, khaki). Find the terrain draws (FL_TRACE_PIXEL on a far-terrain pixel, FL_TRACE_BUNDLES) and why the near ones are missing.
-  - [ ] **The player car is not drawn**: the car layer's D16 depth (tonemap t10) is never a render target; only its AO decal (12-index box, stencil ref 128) is. Pedestrians render black.
+  - [x] **Near terrain / car / roads not drawn**: bundles bound 1x1 dummy render targets (bundle OMSetRenderTargets must be shadow-only).
+  - [x] **Scrambled materials**: bundle inheritance remaps (slots 156-159, DXVK patch 0002).
+  - [x] Black shadows / black building: DXVK SRV hazard unbinding broke the game's probe mip chain (patch 0003).
+  - [ ] Sky shows coarse banding (top-left of the gameplay frame).
 - [ ] ESRAM aliasing: resources share ESRAM offsets (FINDINGS §5b); find out whether any pass reads through an alias what another wrote.
 - [ ] Untiler speed: per-element addrlib calls are fine for BC textures, slow for big uncompressed ones; cache the per-macro-tile pattern.
 - [ ] GPU→CPU: placement memory the GPU writes (render targets the CPU reads back) is not synced back.
@@ -205,7 +207,9 @@ Azimuth runs the game because the GPU reads the game's memory directly. Our copy
 
 - [x] `ActivateAudioInterfaceAsync` → our `IAudioClient2`/`IAudioRenderClient`/`IAudioClock`, backed by an SDL3 audio stream (48 kHz float stereo, PipeWire). FMOD's output path (FINDINGS §4). `FL_AUDIO=null` drops audio.
 - [x] AcpHal heaps, SHAPE context arrays, IAcpHal command/message queues with a 128-sample ACP clock (FINDINGS §4).
-- [ ] **Blocks the intro:** FMOD XMA streams must load (EventInstance::getStreamLoadingState == LOADED) or the IE cutscene never becomes ready (FINDINGS §4). Needs the SHAPE/XMA emulation below.
+- [x] **Blocks the intro:** FMOD XMA streams must load (SHAPE emulation, shape.cpp; consumed as silence without FFmpeg)
+- [ ] Build FFmpeg XMA (`tools/build_ffmpeg_xma.sh`, needs the user: the agent may not compile downloaded code), wire FL_HAVE_FFMPEG_XMA into CMake, test real XMA audio.
+- [ ] (old) Blocks the intro: FMOD XMA streams must load (EventInstance::getStreamLoadingState == LOADED) or the IE cutscene never becomes ready (FINDINGS §4). Needs the SHAPE/XMA emulation below.
 - [ ] SHAPE flowgraph execution: decode the SHAPE commands FMOD puts in its 0x3000-byte flowgraph buffer and the 64-byte XMA contexts, then decode **XMA2** with FFmpeg's `xma2` decoder (Azimuth uses a modified FFmpeg: one stream per decoder, every frame output immediately; Fedora's ffmpeg-free has no xma1/xma2/wmapro decoders (checked 2026-10-26 with avcodec_find_decoder_by_name): build a minimal FFmpeg with only those (LGPL, like dxvk in third_party)).
 - [ ] `xaudio2_9.dll` (dynamically loaded): provide it from the HLE registry via **FAudio**, which implements the XAudio2 API, if the game actually loads it.
 - [ ] Media Foundation `MFCreateSourceReaderFromURL`: find out what it plays. Stub or implement with FFmpeg.

@@ -275,12 +275,14 @@ WINAPI HRESULT dev_CreateQuery(Iface* self, const UINT* desc, void** out) {
     void* obj = nullptr;
     HRESULT hr = dx<HRESULT>(dev_of(self)->dxvk, dd::CreateQuery, desc, out ? &obj : nullptr);
     if (hr < 0) FL_ERROR("d3d: CreateQuery(type=%u misc=0x%x) failed: 0x%08x", desc[0], desc[1], static_cast<uint32_t>(hr));
+    FL_LOG(query, "CreateQuery(type %u misc 0x%x) -> dxvk %p", desc[0], desc[1], obj);
     return wrap(dev_of(self), hr, obj, out, query_vt(), u"D3D11Query", IID_ID3D11Query);
 }
 WINAPI HRESULT dev_CreatePredicate(Iface* self, const UINT* desc, void** out) {
     void* obj = nullptr;
     HRESULT hr = dx<HRESULT>(dev_of(self)->dxvk, dd::CreatePredicate, desc, out ? &obj : nullptr);
     if (hr < 0) FL_ERROR("d3d: CreatePredicate(type=%u) failed: 0x%08x", desc[0], static_cast<uint32_t>(hr));
+    FL_LOG(query, "CreatePredicate(type %u misc 0x%x) -> dxvk %p", desc[0], desc[1], obj);
     HRESULT r = wrap(dev_of(self), hr, obj, out, query_vt(), u"D3D11Predicate", IID_ID3D11Predicate);
     if (r >= 0 && out) child_of(*out)->expose(IID_ID3D11Query, &child_of(*out)->iface);
     return r;

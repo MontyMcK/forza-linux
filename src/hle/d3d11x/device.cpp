@@ -128,7 +128,9 @@ WINAPI HRESULT dev_CreateDeferredContext(Iface* self, UINT flags, void** out) {
         if (out) *out = nullptr;
         return hr;
     }
-    *out = make_context(d, ctx, true);
+    ContextX* c = make_context(d, ctx, true);
+    c->bundle = (flags & kDeferredBundle) != 0;
+    *out = c;
     return S_OK;
 }
 

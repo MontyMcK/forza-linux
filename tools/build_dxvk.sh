@@ -7,17 +7,22 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 git submodule update --init --recursive third_party/dxvk
-# Our patches on top of the pinned release (tools/dxvk-patches/*.patch), each
-# applied once: skipped when it already reverse-applies cleanly.
-for p in tools/dxvk-patches/*.patch; do
-  [ -e "$p" ] || continue
-  if git -C third_party/dxvk apply --reverse --check "$root/$p" 2>/dev/null; then
-    echo "dxvk patch already applied: $p"
+# Our patches on top of the pinned release (tools/dxvk-patches/*.patch), applied
+# in order. If the last one already reverse-applies, the series is in place;
+# otherwise the submodule's sources are reset and the whole series applied.
+patches=(tools/dxvk-patches/*.patch)
+if [ -e "${patches[0]}" ]; then
+  last="${patches[${#patches[@]}-1]}"
+  if git -C third_party/dxvk apply --reverse --check "$root/$last" 2>/dev/null; then
+    echo "dxvk patches already applied (${#patches[@]})"
   else
-    git -C third_party/dxvk apply "$root/$p"
-    echo "dxvk patch applied: $p"
+    git -C third_party/dxvk checkout -- src
+    for p in "${patches[@]}"; do
+      git -C third_party/dxvk apply "$root/$p"
+      echo "dxvk patch applied: $p"
+    done
   fi
-done
+fi
 if [ ! -f build-dxvk/build.ninja ]; then
   meson setup build-dxvk third_party/dxvk --buildtype=release \
     --prefix="$root/build-dxvk/install" \

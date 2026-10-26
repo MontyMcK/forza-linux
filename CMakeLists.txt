@@ -66,6 +66,20 @@ target_link_libraries(forza-linux PRIVATE pthread dl ${FL_DXVK_LIBS} PkgConfig::
 # HLE exports register themselves through static constructors; keep them all.
 target_link_options(forza-linux PRIVATE -Wl,--export-dynamic)
 
+# Optional: FFmpeg's XMA decoders (tools/build_ffmpeg_xma.sh) for the game's
+# XMA audio (src/hle/acphal/shape.cpp). Without them XMA voices are silent.
+set(FL_FFMPEG_XMA_ROOT ${CMAKE_SOURCE_DIR}/build-ffmpeg-xma/install)
+if(EXISTS ${FL_FFMPEG_XMA_ROOT}/lib/libavcodec_flxma.so)
+  message(STATUS "XMA audio: FFmpeg decoders from ${FL_FFMPEG_XMA_ROOT}")
+  target_compile_definitions(forza-linux PRIVATE FL_HAVE_FFMPEG_XMA=1)
+  target_include_directories(forza-linux SYSTEM PRIVATE ${FL_FFMPEG_XMA_ROOT}/include)
+  target_link_libraries(forza-linux PRIVATE ${FL_FFMPEG_XMA_ROOT}/lib/libavcodec_flxma.so
+                        ${FL_FFMPEG_XMA_ROOT}/lib/libavutil_flxma.so)
+  set_target_properties(forza-linux PROPERTIES BUILD_RPATH ${FL_FFMPEG_XMA_ROOT}/lib)
+else()
+  message(STATUS "XMA audio: no FFmpeg decoders (run tools/build_ffmpeg_xma.sh), XMA voices will be silent")
+endif()
+
 add_executable(dxvk_smoke tests/dxvk_smoke.cpp)
 target_include_directories(dxvk_smoke SYSTEM PRIVATE ${FL_DXVK_ROOT}/include/dxvk)
 target_link_libraries(dxvk_smoke PRIVATE ${FL_DXVK_LIBS})

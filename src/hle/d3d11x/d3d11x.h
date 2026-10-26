@@ -159,6 +159,14 @@ struct ContextX {
     // The immediate context shares the device's refcount (as in umd); deferred
     // contexts (same layout, umd table 0x117b60) have their own.
     bool deferred = false;
+    // Draw bundle (deferred context flag 0x20000): its command lists run on the
+    // executing context's targets. Render target / depth binds made while
+    // recording only update this shadow state (OMGet* returns it); they are
+    // not recorded (Azimuth rva 0x12a3c0 -> 0x128390 records no command).
+    bool bundle = false;
+    uint32_t recorded_draws = 0;  // deferred: draws since the last FinishCommandList
+    struct DeviceChild* shadow_rtv[8] = {};
+    struct DeviceChild* shadow_dsv = nullptr;
     std::atomic<ULONG> refs{1};
     bool slot196_flag = false;
     // Deferred contexts: placement resources bound while recording (one

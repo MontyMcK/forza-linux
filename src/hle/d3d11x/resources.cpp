@@ -12,6 +12,7 @@
 #include <cstring>
 
 #include "common/log.h"
+#include "loader/pe_image.h"
 #include "hle/d3d11x/trace.h"
 #include "hle/d3d11x/d3d11x.h"
 #include "hle/d3d11x/dxvk.h"
@@ -153,6 +154,43 @@ WINAPI HRESULT dev_CreateTexture1D(Iface* self, const uint32_t* xd, const void* 
     return create_resource(dev_of(self), 2, xd, init, out, false, nullptr);
 }
 WINAPI HRESULT dev_CreateTexture2D(Iface* self, const uint32_t* xd, const void* init, void** out) {
+    // FL_LOG=create: who creates which texture (to find the code behind a render target).
+    if (log_enabled("create") && init) {
+        struct SubData { const uint8_t* mem; uint32_t pitch, slice; };
+        auto* sd = static_cast<const SubData*>(init);
+        uint32_t n = std::min<uint32_t>(xd[2] ? xd[2] : 1, 12);
+        std::string subs;
+        for (uint32_t i = 0; i < n; i++) {
+            char b[64];
+            uint32_t first = 0;
+            if (sd[i].mem) std::memcpy(&first, sd[i].mem, 4);
+            snprintf(b, sizeof b, " [%u: %p pitch %u first 0x%x]", i, (const void*)sd[i].mem, sd[i].pitch, first);
+            subs += b;
+        }
+        FL_LOG(create, "  init (usage %u cpu 0x%x):%s", xd[7], xd[9], subs.c_str());
+    }
+    FL_LOG(create, "CreateTexture2D %ux%u mips %u arr %u fmt %u samples %u bind 0x%x misc 0x%x from game rva 0x%llx", xd[0],
+           xd[1], xd[2], xd[3], xd[4], xd[5], xd[8], xd[10],
+           (unsigned long long)(reinterpret_cast<uintptr_t>(__builtin_return_address(0)) -
+                                reinterpret_cast<uintptr_t>(loader::main_image().base)));
+    // FL_CREATE_STACK_FMT=<fmt>: also print the game return addresses on the
+    // stack (a rough backtrace) when a texture of that format is created.
+    static const int stack_fmt = getenv("FL_CREATE_STACK_FMT") ? atoi(getenv("FL_CREATE_STACK_FMT")) : -1;
+    if (int(xd[4]) == stack_fmt) {
+        const loader::PeImage& img = loader::main_image();
+        auto* sp = static_cast<const uint64_t*>(__builtin_frame_address(0));
+        std::string bt;
+        for (int i = 0, found = 0; i < 1024 && found < 16; i++) {
+            uint64_t v = sp[i];
+            if (v > uint64_t(reinterpret_cast<uintptr_t>(img.base)) &&
+                v < uint64_t(reinterpret_cast<uintptr_t>(img.base)) + img.size) {
+                char b[24];
+                snprintf(b, sizeof b, " 0x%llx", (unsigned long long)(v - reinterpret_cast<uintptr_t>(img.base)));
+                bt += b, found++;
+            }
+        }
+        FL_LOG(create, "  stack:%s", bt.c_str());
+    }
     return create_resource(dev_of(self), 3, xd, init, out, false, nullptr);
 }
 WINAPI HRESULT dev_CreateTexture3D(Iface* self, const uint32_t* xd, const void* init, void** out) {

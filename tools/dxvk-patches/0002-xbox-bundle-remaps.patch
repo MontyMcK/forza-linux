@@ -1,0 +1,266 @@
+diff --git a/src/d3d11/d3d11.sym b/src/d3d11/d3d11.sym
+index 91c8598e..c43f9e86 100644
+--- a/src/d3d11/d3d11.sym
++++ b/src/d3d11/d3d11.sym
+@@ -1,6 +1,7 @@
+ {
+   global:
+     D3D11CoreCreateDevice;
++    dxvk_xbox_remap_inheritance;
+     D3D11CreateDevice;
+     D3D11CreateDeviceAndSwapChain;
+     D3D11On12CreateDevice;
+diff --git a/src/d3d11/d3d11_cmdlist.cpp b/src/d3d11/d3d11_cmdlist.cpp
+index a75fad74..ba962596 100644
+--- a/src/d3d11/d3d11_cmdlist.cpp
++++ b/src/d3d11/d3d11_cmdlist.cpp
+@@ -79,6 +79,11 @@ namespace dxvk {
+       m_resources.push_back(std::move(entry));
+     }
+ 
++    for (auto remap : pCommandList->m_remaps) {
++      remap.chunk += baseChunkId;
++      m_remaps.push_back(remap);
++    }
++
+     // Return ID of the last chunk added. The command list
+     // added can never be empty, so do not handle zero.
+     return m_chunks.size() - 1;
+@@ -86,11 +91,18 @@ namespace dxvk {
+ 
+ 
+   void D3D11CommandList::EmitToCsThread(
+-    const D3D11ChunkDispatchProc& DispatchProc) {
++    const D3D11ChunkDispatchProc& DispatchProc,
++    const D3D11XboxRemapProc&     RemapProc) {
+     for (const auto& query : m_queries)
+       query->DoDeferredEnd();
+ 
+-    for (size_t i = 0, j = 0; i < m_chunks.size(); i++) {
++    for (size_t i = 0, j = 0, k = 0; i < m_chunks.size(); i++) {
++      // forza-linux: bundle remaps recorded before this chunk
++      for (; k < m_remaps.size() && m_remaps[k].chunk <= i; k++) {
++        if (RemapProc)
++          RemapProc(m_remaps[k]);
++      }
++
+       // If there are resources to track for the current chunk,
+       // use a strong flush hint to dispatch GPU work quickly.
+       GpuFlushType flushType = GpuFlushType::ImplicitWeakHint;
+diff --git a/src/d3d11/d3d11_cmdlist.h b/src/d3d11/d3d11_cmdlist.h
+index 6b5e0520..9d198604 100644
+--- a/src/d3d11/d3d11_cmdlist.h
++++ b/src/d3d11/d3d11_cmdlist.h
+@@ -13,6 +13,7 @@ namespace dxvk {
+   constexpr UINT D3D11_CONTEXT_FLAG_XBOX_BUNDLE = 0x20000;
+   
+   using D3D11ChunkDispatchProc = std::function<uint64_t (DxvkCsChunkRef&&, uint64_t, GpuFlushType)>;
++  using D3D11XboxRemapProc = std::function<void (const D3D11XboxRemap&)>;
+ 
+   class D3D11CommandList : public D3D11DeviceChild<ID3D11CommandList> {
+     
+@@ -41,7 +42,18 @@ namespace dxvk {
+             D3D11CommandList*   pCommandList);
+ 
+     void EmitToCsThread(
+-      const D3D11ChunkDispatchProc& DispatchProc);
++      const D3D11ChunkDispatchProc& DispatchProc,
++      const D3D11XboxRemapProc&     RemapProc = nullptr);
++
++    // forza-linux: a bundle remap that applies before the next chunk added
++    void AddXboxRemap(
++      const D3D11XboxRemap&         Remap) {
++      m_remaps.push_back(Remap);
++    }
++
++    size_t GetChunkCount() const {
++      return m_chunks.size();
++    }
+ 
+     void TrackResourceUsage(
+             ID3D11Resource*     pResource,
+@@ -69,6 +81,7 @@ namespace dxvk {
+     std::vector<ChunkEntry>             m_chunks;
+     std::vector<Com<D3D11Query, false>> m_queries;
+     std::vector<TrackedResource>        m_resources;
++    std::vector<D3D11XboxRemap>         m_remaps;
+ 
+     D3DDestructionNotifier              m_destructionNotifier;
+ 
+diff --git a/src/d3d11/d3d11_context.cpp b/src/d3d11/d3d11_context.cpp
+index 487bcf58..12b9de61 100644
+--- a/src/d3d11/d3d11_context.cpp
++++ b/src/d3d11/d3d11_context.cpp
+@@ -3953,6 +3953,46 @@ namespace dxvk {
+   }
+ 
+ 
++  template<typename ContextType>
++  void D3D11CommonContext<ContextType>::ApplyXboxRemap(
++    const D3D11XboxRemap&                   Remap) {
++    auto dst = D3D11ShaderType(Remap.dstStage);
++    auto src = D3D11ShaderType(Remap.srcStage);
++
++    switch (Remap.kind) {
++      case 0: {
++        if (Remap.dstSlot >= D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT
++         || Remap.srcSlot >= D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT)
++          return;
++        const auto& b = m_state.cbv[src].buffers[Remap.srcSlot];
++        BindConstantBuffer(dst, Remap.dstSlot, b.buffer.ptr(), b.constantOffset, b.constantBound);
++      } break;
++
++      case 1:
++        if (Remap.dstSlot >= D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT
++         || Remap.srcSlot >= D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT)
++          return;
++        BindShaderResource(dst, Remap.dstSlot, m_state.srv[src].views[Remap.srcSlot].ptr());
++        break;
++
++      case 2:
++        if (Remap.dstSlot >= D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT
++         || Remap.srcSlot >= D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT)
++          return;
++        BindSampler(dst, Remap.dstSlot, m_state.samplers[src].samplers[Remap.srcSlot].ptr());
++        break;
++
++      case 3: {
++        if (Remap.dstSlot >= D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT
++         || Remap.srcSlot >= D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT)
++          return;
++        const auto& v = m_state.ia.vertexBuffers[Remap.srcSlot];
++        BindVertexBuffer(Remap.dstSlot, v.buffer.ptr(), v.offset, v.stride);
++      } break;
++    }
++  }
++
++
+   template<typename ContextType>
+   void D3D11CommonContext<ContextType>::BindShaderResource(
+           D3D11ShaderType                   ShaderStage,
+diff --git a/src/d3d11/d3d11_context.h b/src/d3d11/d3d11_context.h
+index eac36791..a32496e4 100644
+--- a/src/d3d11/d3d11_context.h
++++ b/src/d3d11/d3d11_context.h
+@@ -23,6 +23,23 @@
+ 
+ namespace dxvk {
+ 
++  /**
++   * \brief forza-linux: an Xbox draw bundle's inheritance remap
++   *
++   * Recorded by RemapConstantBuffer/ShaderResource/Sampler/VertexBuffer-
++   * Inheritance on a bundle: before command list chunk \c chunk runs, slot
++   * (dstStage, dstSlot) gets the executing context's binding of (srcStage,
++   * srcSlot) as it was when the bundle started.
++   */
++  struct D3D11XboxRemap {
++    uint32_t kind;      ///< 0 constant buffer, 1 shader resource, 2 sampler, 3 vertex buffer
++    uint32_t dstStage;  ///< D3D11ShaderType (unused for vertex buffers)
++    uint32_t dstSlot;
++    uint32_t srcStage;
++    uint32_t srcSlot;
++    size_t   chunk;
++  };
++
+   class D3D11DeferredContext;
+   class D3D11ImmediateContext;
+ 
+@@ -919,6 +936,10 @@ namespace dxvk {
+             UINT                              Slot,
+             D3D11ShaderResourceView*          pResource);
+ 
++    // forza-linux: binds what an Xbox bundle remap names (see D3D11XboxRemap)
++    void ApplyXboxRemap(
++      const D3D11XboxRemap&                   Remap);
++
+     void BindUnorderedAccessView(
+             D3D11ShaderType                   ShaderStage,
+             UINT                              Slot,
+diff --git a/src/d3d11/d3d11_context_def.cpp b/src/d3d11/d3d11_context_def.cpp
+index 6277a9cf..c6017993 100644
+--- a/src/d3d11/d3d11_context_def.cpp
++++ b/src/d3d11/d3d11_context_def.cpp
+@@ -394,6 +394,23 @@ namespace dxvk {
+   }
+ 
+ 
++  void D3D11DeferredContext::XboxRemapInheritance(
++          UINT                        Kind,
++          UINT                        DstStage,
++          UINT                        DstSlot,
++          UINT                        SrcStage,
++          UINT                        SrcSlot) {
++    D3D10DeviceLock lock = LockContext();
++
++    // Close the current chunk so the remap lands between the commands
++    // recorded before and after it.
++    FlushCsChunk();
++
++    m_commandList->AddXboxRemap({ Kind, DstStage, DstSlot, SrcStage, SrcSlot,
++      m_commandList->GetChunkCount() });
++  }
++
++
+   Com<D3D11CommandList> D3D11DeferredContext::CreateCommandList() {
+     return new D3D11CommandList(m_parent, m_flags);
+   }
+@@ -452,3 +469,21 @@ namespace dxvk {
+   }
+ 
+ }
++
++
++// forza-linux: entry point for the Xbox runtime (bundle contexts only).
++extern "C" DLLEXPORT void dxvk_xbox_remap_inheritance(
++        ID3D11DeviceContext*  pContext,
++        UINT                  Kind,
++        UINT                  DstStage,
++        UINT                  DstSlot,
++        UINT                  SrcStage,
++        UINT                  SrcSlot) {
++  if (!pContext || pContext->GetType() != D3D11_DEVICE_CONTEXT_DEFERRED)
++    return;
++
++  auto context = static_cast<dxvk::D3D11DeferredContext*>(pContext);
++
++  if (context->GetContextFlags() & dxvk::D3D11_CONTEXT_FLAG_XBOX_BUNDLE)
++    context->XboxRemapInheritance(Kind, DstStage, DstSlot, SrcStage, SrcSlot);
++}
+diff --git a/src/d3d11/d3d11_context_def.h b/src/d3d11/d3d11_context_def.h
+index feabf448..ba5d392a 100644
+--- a/src/d3d11/d3d11_context_def.h
++++ b/src/d3d11/d3d11_context_def.h
+@@ -54,6 +54,14 @@ namespace dxvk {
+     void STDMETHODCALLTYPE ExecuteCommandList(
+             ID3D11CommandList*          pCommandList,
+             BOOL                        RestoreContextState);
++
++    // forza-linux: Xbox bundle inheritance remap (see D3D11XboxRemap)
++    void XboxRemapInheritance(
++            UINT                        Kind,
++            UINT                        DstStage,
++            UINT                        DstSlot,
++            UINT                        SrcStage,
++            UINT                        SrcSlot);
+     
+     HRESULT STDMETHODCALLTYPE FinishCommandList(
+             BOOL                        RestoreDeferredContextState,
+diff --git a/src/d3d11/d3d11_context_imm.cpp b/src/d3d11/d3d11_context_imm.cpp
+index ef3a1b1f..77966837 100644
+--- a/src/d3d11/d3d11_context_imm.cpp
++++ b/src/d3d11/d3d11_context_imm.cpp
+@@ -266,7 +266,12 @@ namespace dxvk {
+       AddCost(cost);
+       ConsiderFlush(flushType);
+       return csSeqNum;
+-    });
++    }, bundle ? D3D11XboxRemapProc([this] (const D3D11XboxRemap& remap) {
++      // forza-linux: bind into the immediate context's chunk, then submit it
++      // ahead of the bundle's next chunk.
++      ApplyXboxRemap(remap);
++      FlushCsChunk();
++    }) : D3D11XboxRemapProc());
+ 
+     // Restore the immediate context's state
+     if (RestoreContextState || bundle)
