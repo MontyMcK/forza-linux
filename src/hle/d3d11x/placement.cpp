@@ -204,9 +204,59 @@ std::atomic<uint64_t> g_bytes_scanned{0}, g_cold_skips{0}, g_frame_scan_ns{0}, g
 // meshes) trust the frame scan, so a write to them reaches the GPU at most
 // kScanParts frames late (streamed mips, rare rewrites).
 // FL_NO_FRAME_SCAN=1: per-bind scans for everything (the old behaviour).
-constexpr uint32_t kScanParts = 4;
-constexpr uint32_t kColdFrames = 2 * kScanParts + 2;
+// FL_SCAN_PARTS=n overrides the slice count (1: everything every frame).
+const uint32_t kScanParts = [] {
+    const char* e = getenv("FL_SCAN_PARTS");
+    int n = e ? atoi(e) : 4;
+    return static_cast<uint32_t>(n < 1 ? 1 : n);
+}();
+const uint32_t kColdFrames = 2 * kScanParts + 2;
 std::atomic<uint32_t> g_epoch{1};
+
+// FL_LOG=latewrite (diagnostic): copies of the small buffers uploaded this
+// frame; at Present, any whose game memory changed since is reported (the
+// console GPU would have read the newer bytes).
+struct LateCheck {
+    Resource* r;
+    uint8_t* place;
+    std::vector<uint8_t> bytes;
+};
+std::mutex g_late_mutex;
+std::vector<LateCheck> g_late;
+
+void late_remember(Resource* r) {
+    if (r->dim != 1 || r->place_size > 65536 || !gpumem::readable(r->place, r->place_size)) return;
+    r->add_ref();
+    std::lock_guard lock(g_late_mutex);
+    g_late.push_back({r, r->place, std::vector<uint8_t>(r->place, r->place + r->place_size)});
+}
+
+void late_check(uint32_t epoch) {
+    std::vector<LateCheck> v;
+    {
+        std::lock_guard lock(g_late_mutex);
+        v.swap(g_late);
+    }
+    static int logged = 0;
+    size_t changed = 0;
+    for (auto& c : v) {
+        size_t n = c.bytes.size();
+        if (c.r->place == c.place && gpumem::readable(c.place, n) && std::memcmp(c.place, c.bytes.data(), n) != 0) {
+            changed++;
+            size_t first = 0, last = n;
+            while (first < n && c.place[first] == c.bytes[first]) first++;
+            while (last > first && c.place[last - 1] == c.bytes[last - 1]) last--;
+            static const uint32_t from = getenv("FL_LATE_FROM") ? atoi(getenv("FL_LATE_FROM")) : 0;
+            if (epoch >= from && logged < 400) {
+                logged++;
+                FL_LOG(latewrite, "epoch %u late write: [%s] %zu B at %p, bytes [%zu, %zu) changed", epoch,
+                       trace::describe_dxvk(c.r->dxvk), n, static_cast<void*>(c.place), first, last);
+            }
+        }
+        c.r->release();
+    }
+    FL_LOG(latewrite, "epoch %u: %zu of %zu small buffers changed after upload", epoch, changed, v.size());
+}
 bool frame_scan_on() {
     static const bool on = getenv("FL_NO_FRAME_SCAN") == nullptr;
     return on;
@@ -285,12 +335,19 @@ void sync_placement(void* dxvk_ctx, Resource* r) {
         timer.t0 = t1;
     }
     if (!is_dirty) {
-        if (check && r->upload_hash && r->place_size <= (1u << 20) && gpumem::readable(r->place, r->place_size) &&
-            hash(r->place, r->place_size) != r->upload_hash) {
+        // FL_CHECK_TRACKING=buf: buffers up to 64 KiB only (fast enough to play);
+        // FL_LATE_FROM=epoch: report from that frame on.
+        static const bool buf_only = check && getenv("FL_CHECK_TRACKING")[0] == 'b';
+        static const uint32_t from = getenv("FL_LATE_FROM") ? atoi(getenv("FL_LATE_FROM")) : 0;
+        size_t limit = buf_only ? 65536 : 64u << 20;
+        if (check && epoch >= from && r->upload_hash && (!buf_only || r->dim == 1) && r->place_size <= limit &&
+            gpumem::readable(r->place, r->place_size) && hash(r->place, r->place_size) != r->upload_hash) {
             static std::atomic<int> reported{0};
-            if (reported++ < 20)
-                FL_ERROR("gpumem: MISSED write: [%s] at %p size 0x%zx changed but reads clean", trace::describe_dxvk(r->dxvk),
+            if (reported++ < 200)
+                FL_ERROR("gpumem: MISSED write (epoch %u, %s, written %u): [%s] at %p size 0x%zx changed but reads clean",
+                         epoch, cold ? "cold" : "scanned", written, trace::describe_dxvk(r->dxvk),
                          static_cast<void*>(r->place), r->place_size);
+            r->upload_hash = hash(r->place, r->place_size);  // report each change once
         }
         return;
     }
@@ -308,8 +365,10 @@ void sync_placement(void* dxvk_ctx, Resource* r) {
         r->untracked.store(!gpumem::begin_upload(r->place, r->place_size, &mark_page_neighbours, r),
                            std::memory_order_relaxed);
     }
-    if (check && r->place_size <= (1u << 20) && gpumem::readable(r->place, r->place_size))
+    if (check && r->place_size <= (64u << 20) && gpumem::readable(r->place, r->place_size))
         r->upload_hash = hash(r->place, r->place_size);
+    static const bool late = log_enabled("latewrite");
+    if (late) late_remember(r);
     FL_LOG(upload, "placement upload [%s] dim %d at %p size 0x%zx tile %u", trace::describe_dxvk(r->dxvk), r->dim,
            static_cast<void*>(r->place), r->place_size, r->tile_mode);
     if (trace::active()) trace::event("upload placement [%s]", trace::describe_dxvk(r->dxvk));
@@ -379,6 +438,8 @@ void on_memory_remapped(uint64_t start, uint64_t end) {
 void placement_frame_scan() {
     static const bool hooked = (gpumem::set_remap_hook(&on_memory_remapped), true);
     (void)hooked;
+    static const bool late = log_enabled("latewrite");
+    if (late) late_check(g_epoch.load(std::memory_order_relaxed));
     if (!frame_scan_on()) return;
     static const bool stats = log_enabled("fps");
     int64_t t0 = stats ? now_ns() : 0;

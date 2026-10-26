@@ -191,6 +191,7 @@ WINAPI HRESULT ctx_SetPrivateDataInterface(void* self, const GUID& g, void* unkn
     }                                                                                                        \
     WINAPI void ctx_##S##SetShaderResources(void* self, UINT start, UINT n, void* const* views) {            \
         Unwrapped u(ctxdx(self), views, n);                                                                               \
+        if (trace::active() && #S[0] == 'C') trace::event("CSSetShaderResources(%u, %u) [ctx %p]", start, n, ctxdx(self)); \
         dx<void>(ctxdx(self), dc::S##SetShaderResources, start, n, u.p);                                     \
     }                                                                                                        \
     WINAPI void ctx_##S##SetSamplers(void* self, UINT start, UINT n, void* const* samplers) {                \
@@ -691,6 +692,7 @@ WINAPI void ctx_CSGetUnorderedAccessViews(void* self, UINT start, UINT n, void**
 
 WINAPI void ctx_ClearState(void* self) {
     auto* c = C::from(self);
+    trace::event("ClearState [ctx %p]", c->dxvk);
     dx<void>(c->dxvk, dc::ClearState);
     c->applied_topology_bits = 0;  // DXVK forgot the topology; re-apply on the next draw
     if (c->bundle) set_bundle_targets(c, 0, nullptr, nullptr);
@@ -733,7 +735,9 @@ WINAPI HRESULT ctx_FinishCommandList(void* self, BOOL restore, void** out) {
     if (trace_bundles && !trace::active())
         log_write("trace", "#finish deferred %p [ctx %p] -> list %p", self, c->dxvk, list);
     trace::event("FinishCommandList on deferred %p [ctx %p] -> list %p (hr 0x%x)", self, c->dxvk, list, static_cast<uint32_t>(hr));
-    if (!restore) c->applied_topology_bits = 0;
+    // A bundle's first draw always records its topology: the bundle runs on the
+    // executing context's state, whatever this context had before.
+    if (!restore || c->bundle) c->applied_topology_bits = 0;
     if (!restore && c->bundle) set_bundle_targets(c, 0, nullptr, nullptr);  // the context state resets
     c->recorded_draws = 0;
     if (hr < 0 || !out) {
@@ -771,11 +775,14 @@ WINAPI void ctx_ExecuteCommandList(void* self, void* list, BOOL restore) {
         UINT nvp = 1;
         dx<void>(c->dxvk, dc::RSGetViewports, &nvp, &vp);
         UINT flags = dx<UINT>(unwrap(list), 7 /* ID3D11CommandList::GetContextFlags */);
-        trace::event("ExecuteCommandList %p (dxvk %p, flags 0x%x) on %s %p: rt0 %p ds %p viewport %.0fx%.0f", list,
-                     unwrap(list), flags, c->deferred ? "deferred" : "immediate", self, rtv, dsv, vp.w, vp.h);
+        trace::event("ExecuteCommandList %p (dxvk %p, flags 0x%x, restore %d) on %s %p: rt0 %p ds %p viewport %.0fx%.0f",
+                     list, unwrap(list), flags, restore, c->deferred ? "deferred" : "immediate", self, rtv, dsv, vp.w,
+                     vp.h);
         if (rtv) dx_release(rtv);
         if (dsv) dx_release(dsv);
-        trace::log_targets(c->dxvk, "      ");
+        static const bool full = getenv("FL_TRACE_ECL_STATE") != nullptr;
+        if (full) trace::log_state(c->dxvk);
+        else trace::log_targets(c->dxvk, "      ");
     }
     // FL_TRACE_ECL_STATS=1 (traced frames, immediate context): pipeline
     // statistics of each command list, to see where a bundle's geometry is lost.
@@ -932,6 +939,8 @@ void bind_one(void* ctx, int stage, int kind, UINT slot, void* obj) {
     static const int smp[6] = {dc::VSSetSamplers, dc::HSSetSamplers, dc::DSSetSamplers,
                                dc::GSSetSamplers, dc::PSSetSamplers, dc::CSSetSamplers};
     void* p = bind_unwrap(ctx, obj);
+    if (stage == 5 && kind == 0 && trace::active())
+        trace::event("bind CS t%u <- %s [ctx %p]", slot, p ? trace::describe_dxvk(p) : "null", ctx);
     const int* table = kind == 0 ? srv : kind == 1 ? cb : smp;
     dx<void>(ctx, table[stage], slot, 1u, &p);
 }

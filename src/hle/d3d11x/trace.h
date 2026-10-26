@@ -31,5 +31,7 @@ void event(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 const char* describe_dxvk(void* dxvk_obj);
 // The render targets and depth target bound on `dxctx`, one line each.
 void log_targets(void* dxctx, const char* indent);
+// Every binding and state object bound on `dxctx` (shaders, CBs, SRVs, samplers, IA, RS, OM).
+void log_state(void* dxctx);
 
 }  // namespace fl::d3d::trace

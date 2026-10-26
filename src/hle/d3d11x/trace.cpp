@@ -736,6 +736,90 @@ void log_fixed_state(void* ctx) {
     if (blend) dx_release(blend);
 }
 
+// Every binding and state object of `ctx` that a draw bundle could inherit
+// (FL_TRACE_ECL_STATE=1 logs it at each traced ExecuteCommandList).
+void log_state(void* ctx) {
+    log_fixed_state(ctx);
+    void* rs = nullptr;
+    dx<void>(ctx, dc::RSGetState, &rs);
+    if (rs) {
+        uint32_t rd[10] = {};
+        dx<void>(rs, 7 /* GetDesc */, rd);
+        float clamp, slope;
+        memcpy(&clamp, &rd[4], 4);
+        memcpy(&slope, &rd[5], 4);
+        log_write("trace", "    RS bias %d clamp %g slope %g scissor %u ms %u aa %u", int32_t(rd[3]), clamp, slope, rd[7],
+                  rd[8], rd[9]);
+        dx_release(rs);
+    }
+    void* dss = nullptr;
+    UINT sref = 0;
+    dx<void>(ctx, dc::OMGetDepthStencilState, &dss, &sref);
+    if (dss) {
+        uint32_t d[13] = {};
+        dx<void>(dss, 7 /* GetDesc */, d);
+        log_write("trace", "    DSS %p: %u %u %u %u %x %x | %u %u %u %u | %u %u %u %u ref %u", (void*)wrapper_of(dss), d[0], d[1],
+                  d[2], d[3], d[4] & 0xff, d[5] & 0xff, d[6], d[7], d[8], d[9], d[10], d[11], d[12], 0u, sref);
+        dx_release(dss);
+    } else {
+        log_write("trace", "    DSS default ref %u", sref);
+    }
+    struct Stage {
+        const char* name;
+        int shader, cbs, srvs, samplers;
+    } stages[] = {
+        {"VS", dc::VSGetShader, dc::VSGetConstantBuffers1, dc::VSGetShaderResources, dc::VSGetSamplers},
+        {"PS", dc::PSGetShader, dc::PSGetConstantBuffers1, dc::PSGetShaderResources, dc::PSGetSamplers},
+        {"GS", dc::GSGetShader, dc::GSGetConstantBuffers1, dc::GSGetShaderResources, dc::GSGetSamplers},
+        {"HS", dc::HSGetShader, dc::HSGetConstantBuffers1, dc::HSGetShaderResources, dc::HSGetSamplers},
+        {"DS", dc::DSGetShader, dc::DSGetConstantBuffers1, dc::DSGetShaderResources, dc::DSGetSamplers},
+        {"CS", dc::CSGetShader, dc::CSGetConstantBuffers1, dc::CSGetShaderResources, dc::CSGetSamplers},
+    };
+    for (const Stage& st : stages) {
+        void* sh = nullptr;
+        dx<void>(ctx, st.shader, &sh, nullptr, nullptr);
+        log_write("trace", "    %s shader %s", st.name, shader_str(sh).c_str());
+        if (sh) dx_release(sh);
+        void* cbs[14] = {};
+        UINT first[14] = {}, num[14] = {};
+        dx<void>(ctx, st.cbs, 0u, 14u, cbs, first, num);
+        for (int i = 0; i < 14; i++)
+            if (cbs[i]) {
+                log_write("trace", "    %s cb%d %s +%u n%u", st.name, i, resource_str(cbs[i]).c_str(), first[i] * 16, num[i]);
+                dx_release(cbs[i]);
+            }
+        void* srvs[64] = {};
+        dx<void>(ctx, st.srvs, 0u, 64u, srvs);
+        for (int i = 0; i < 64; i++)
+            if (srvs[i]) {
+                log_write("trace", "    %s t%d %s", st.name, i, view_str(srvs[i]).c_str());
+                dx_release(srvs[i]);
+            }
+        void* smp[16] = {};
+        dx<void>(ctx, st.samplers, 0u, 16u, smp);
+        for (int i = 0; i < 16; i++)
+            if (smp[i]) {
+                log_write("trace", "    %s s%d %p", st.name, i, (void*)wrapper_of(smp[i]));
+                dx_release(smp[i]);
+            }
+    }
+    void* ib = nullptr;
+    UINT ibfmt = 0, iboff = 0;
+    dx<void>(ctx, dc::IAGetIndexBuffer, &ib, &ibfmt, &iboff);
+    if (ib) {
+        log_write("trace", "    IB %s fmt %u off %u", resource_str(ib).c_str(), ibfmt, iboff);
+        dx_release(ib);
+    }
+    void* vb[8] = {};
+    UINT stride[8] = {}, off[8] = {};
+    dx<void>(ctx, dc::IAGetVertexBuffers, 0u, 8u, vb, stride, off);
+    for (int i = 0; i < 8; i++)
+        if (vb[i]) {
+            log_write("trace", "    vb%d %s stride %u off %u", i, resource_str(vb[i]).c_str(), stride[i], off[i]);
+            dx_release(vb[i]);
+        }
+}
+
 void note_write(const char* how, void* dst_dxvk, void* src_dxvk) {
     if (!dst_dxvk || !log_enabled("firstwrite")) return;
     static std::mutex m;

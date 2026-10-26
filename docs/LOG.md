@@ -278,3 +278,13 @@ Next: the shadow flicker (back burner per the user), dynamic FPS (§6c), audio (
 - Diagnostics: FL_DUMP_XMA=<dir> dumps the first 40 voices' packets and decoded PCM; FL_LOG=audio has the counters above. One intermittent startup crash inside DXVK (rip libdxvk_d3d11+0x1f6fa9, 0.28 s, radv in the stack) did not repeat; its log is in the session scratchpad.
 
 Next: rebuild FFmpeg with the patch and re-measure (expect fewer clicks in gameplay: sound tails); replace the linear SRC interpolation with a windowed-sinc resampler like the hardware's (Azimuth: up to 40 taps); start voices whose read offset is inside a packet at the right frame (now logged as "XMA read starts inside a packet").
+
+## 2026-10-27 (late morning): Claude: car shadow flicker fixed (bundle state)
+
+- Symptom: the car's shadow vanished every 4th frame at some spots. 64 consecutive screenshots showed the exact period 4; the bad frame is always the one that re-renders the 2048² static cascade.
+- Ruled out by measurement: late CPU writes after our uploads (FL_LOG=latewrite now compares the bytes of every small uploaded buffer at Present), missed write tracking (FL_CHECK_TRACKING=1/buf now reports with the epoch and cold/scanned, and FL_LATE_FROM=<frame> limits it to frames of interest), the frame-scan slicing (FL_SCAN_PARTS=1 still flickered), DMA clear ordering (all on the render thread, in order).
+- Cause and fix: FINDINGS "Bundle sets must never be filtered as redundant". DXVK patch 0004; `tools/build_dxvk.sh` applies it. Also: a bundle's first draw always re-applies its topology (context.cpp).
+- New trace aids: FL_TRACE_ECL_STATE=1, CS SRV binds and ClearState in traced frames, the ECL restore flag.
+- Testing note: the game autosaves during test runs, so the start position drifts; keep a copy of the test save and restore it before each run.
+
+Next: confirm in play at the spots where the user saw it; then streaming hitches and the DXVK startup crash.

@@ -1,0 +1,209 @@
+--- a/src/d3d11/d3d11_context.h
++++ b/src/d3d11/d3d11_context.h
+@@ -940,6 +940,15 @@
+     void ApplyXboxRemap(
+       const D3D11XboxRemap&                   Remap);
+ 
++    // forza-linux: an Xbox draw bundle (D3D11_CONTEXT_FLAG_XBOX_BUNDLE) runs on
++    // the executing context's state, not on the state tracked while it was
++    // recorded, so no set inside it is redundant: every set is recorded. (A
++    // depth-only bundle's PSSetShader(nullptr) matched the reset state and was
++    // dropped, so the bundle ran whatever pixel shader the caller had bound.)
++    bool IsXboxBundle() const {
++      return m_flags & 0x20000u;
++    }
++
+     void BindUnorderedAccessView(
+             D3D11ShaderType                   ShaderStage,
+             UINT                              Slot,
+--- a/src/d3d11/d3d11_context.cpp
++++ b/src/d3d11/d3d11_context.cpp
+@@ -1236,13 +1236,13 @@
+ 
+     auto inputLayout = static_cast<D3D11InputLayout*>(pInputLayout);
+ 
+-    if (m_state.ia.inputLayout != inputLayout) {
++    if (m_state.ia.inputLayout != inputLayout || IsXboxBundle()) {
+       bool equal = false;
+ 
+       // Some games (e.g. Grim Dawn) create lots and lots of
+       // identical input layouts, so we'll only apply the state
+       // if the input layouts has actually changed between calls.
+-      if (m_state.ia.inputLayout != nullptr && inputLayout != nullptr)
++      if (m_state.ia.inputLayout != nullptr && inputLayout != nullptr && !IsXboxBundle())
+         equal = m_state.ia.inputLayout->Compare(inputLayout);
+ 
+       m_state.ia.inputLayout = inputLayout;
+@@ -1257,7 +1257,7 @@
+   void STDMETHODCALLTYPE D3D11CommonContext<ContextType>::IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY Topology) {
+     D3D10DeviceLock lock = LockContext();
+ 
+-    if (m_state.ia.primitiveTopology != Topology) {
++    if (m_state.ia.primitiveTopology != Topology || IsXboxBundle()) {
+       m_state.ia.primitiveTopology = Topology;
+       ApplyPrimitiveTopology();
+     }
+@@ -1276,7 +1276,7 @@
+     for (uint32_t i = 0; i < NumBuffers; i++) {
+       auto newBuffer = static_cast<D3D11Buffer*>(ppVertexBuffers[i]);
+ 
+-      if (m_state.ia.vertexBuffers[StartSlot + i].buffer != newBuffer) {
++      if (m_state.ia.vertexBuffers[StartSlot + i].buffer != newBuffer || IsXboxBundle()) {
+         m_state.ia.vertexBuffers[StartSlot + i].buffer = newBuffer;
+         m_state.ia.vertexBuffers[StartSlot + i].offset = pOffsets[i];
+         m_state.ia.vertexBuffers[StartSlot + i].stride = pStrides[i];
+@@ -1305,7 +1305,7 @@
+ 
+     auto newBuffer = static_cast<D3D11Buffer*>(pIndexBuffer);
+ 
+-    if (m_state.ia.indexBuffer.buffer != newBuffer) {
++    if (m_state.ia.indexBuffer.buffer != newBuffer || IsXboxBundle()) {
+       m_state.ia.indexBuffer.buffer = newBuffer;
+       m_state.ia.indexBuffer.offset = Offset;
+       m_state.ia.indexBuffer.format = Format;
+@@ -1399,7 +1399,7 @@
+     SetClassInstances<D3D11ShaderType::eVertex>(
+       shader ? shader->GetCommonShader() : nullptr, ppClassInstances, NumClassInstances);
+ 
+-    if (m_state.vs != shader) {
++    if (m_state.vs != shader || IsXboxBundle()) {
+       m_state.vs = shader;
+ 
+       BindShader<D3D11ShaderType::eVertex>(GetCommonShader(shader));
+@@ -1535,7 +1535,7 @@
+     SetClassInstances<D3D11ShaderType::eHull>(
+       shader ? shader->GetCommonShader() : nullptr, ppClassInstances, NumClassInstances);
+ 
+-    if (m_state.hs != shader) {
++    if (m_state.hs != shader || IsXboxBundle()) {
+       m_state.hs = shader;
+ 
+       BindShader<D3D11ShaderType::eHull>(GetCommonShader(shader));
+@@ -1671,7 +1671,7 @@
+     SetClassInstances<D3D11ShaderType::eDomain>(
+       shader ? shader->GetCommonShader() : nullptr, ppClassInstances, NumClassInstances);
+ 
+-    if (m_state.ds != shader) {
++    if (m_state.ds != shader || IsXboxBundle()) {
+       m_state.ds = shader;
+ 
+       BindShader<D3D11ShaderType::eDomain>(GetCommonShader(shader));
+@@ -1807,7 +1807,7 @@
+     SetClassInstances<D3D11ShaderType::eGeometry>(
+       shader ? shader->GetCommonShader() : nullptr, ppClassInstances, NumClassInstances);
+ 
+-    if (m_state.gs != shader) {
++    if (m_state.gs != shader || IsXboxBundle()) {
+       m_state.gs = shader;
+ 
+       BindShader<D3D11ShaderType::eGeometry>(GetCommonShader(shader));
+@@ -1943,7 +1943,7 @@
+     SetClassInstances<D3D11ShaderType::ePixel>(
+       shader ? shader->GetCommonShader() : nullptr, ppClassInstances, NumClassInstances);
+ 
+-    if (m_state.ps != shader) {
++    if (m_state.ps != shader || IsXboxBundle()) {
+       m_state.ps = shader;
+ 
+       BindShader<D3D11ShaderType::ePixel>(GetCommonShader(shader));
+@@ -2079,7 +2079,7 @@
+     SetClassInstances<D3D11ShaderType::eCompute>(
+       shader ? shader->GetCommonShader() : nullptr, ppClassInstances, NumClassInstances);
+ 
+-    if (m_state.cs != shader) {
++    if (m_state.cs != shader || IsXboxBundle()) {
+       m_state.cs = shader;
+ 
+       BindShader<D3D11ShaderType::eCompute>(GetCommonShader(shader));
+@@ -2317,7 +2317,8 @@
+     auto blendState = static_cast<D3D11BlendState*>(pBlendState);
+ 
+     if (m_state.om.cbState    != blendState
+-     || m_state.om.sampleMask != SampleMask) {
++     || m_state.om.sampleMask != SampleMask
++     || IsXboxBundle()) {
+       m_state.om.cbState    = blendState;
+       m_state.om.sampleMask = SampleMask;
+ 
+@@ -2341,7 +2342,7 @@
+ 
+     auto depthStencilState = static_cast<D3D11DepthStencilState*>(pDepthStencilState);
+ 
+-    if (m_state.om.dsState != depthStencilState) {
++    if (m_state.om.dsState != depthStencilState || IsXboxBundle()) {
+       m_state.om.dsState = depthStencilState;
+       ApplyDepthStencilState();
+     }
+@@ -2350,7 +2351,7 @@
+     // and some games rely on this behaviour. Do the same here.
+     StencilRef &= 0xFF;
+ 
+-    if (m_state.om.stencilRef != StencilRef) {
++    if (m_state.om.stencilRef != StencilRef || IsXboxBundle()) {
+       m_state.om.stencilRef = StencilRef;
+       ApplyStencilRef();
+     }
+@@ -2437,7 +2438,7 @@
+ 
+     auto newRasterizerState = static_cast<D3D11RasterizerState*>(pRasterizerState);
+ 
+-    if (m_state.rs.state != newRasterizerState) {
++    if (m_state.rs.state != newRasterizerState || IsXboxBundle()) {
+       // Need to keep the previous rasterizer state object alive for the time being
+       auto oldRasterizerState = std::move(m_state.rs.state);
+ 
+@@ -2498,7 +2499,7 @@
+       m_state.rs.viewports[i] = pViewports[i];
+     }
+ 
+-    if (dirty)
++    if (dirty || IsXboxBundle())
+       ApplyViewportState();
+   }
+ 
+@@ -2529,7 +2530,7 @@
+       }
+     }
+ 
+-    if (dirty && m_state.rs.state && m_state.rs.state->Desc().ScissorEnable)
++    if (IsXboxBundle() || (dirty && m_state.rs.state && m_state.rs.state->Desc().ScissorEnable))
+       ApplyViewportState();
+   }
+ 
+@@ -5235,7 +5236,8 @@
+ 
+       if (bindings.buffers[StartSlot + i].buffer         != newBuffer
+        || bindings.buffers[StartSlot + i].constantOffset != 0
+-       || bindings.buffers[StartSlot + i].constantCount  != constantCount) {
++       || bindings.buffers[StartSlot + i].constantCount  != constantCount
++       || IsXboxBundle()) {
+         bindings.buffers[StartSlot + i].buffer         = newBuffer;
+         bindings.buffers[StartSlot + i].constantOffset = 0;
+         bindings.buffers[StartSlot + i].constantCount  = constantCount;
+@@ -5293,7 +5295,7 @@
+       }
+ 
+       // Do a full rebind if either the buffer changes
+-      if (bindings.buffers[StartSlot + i].buffer != newBuffer) {
++      if (bindings.buffers[StartSlot + i].buffer != newBuffer || IsXboxBundle()) {
+         bindings.buffers[StartSlot + i].buffer = newBuffer;
+         bindings.buffers[StartSlot + i].constantOffset = constantOffset;
+         bindings.buffers[StartSlot + i].constantCount  = constantCount;
+@@ -5328,7 +5330,7 @@
+     for (uint32_t i = 0; i < NumResources; i++) {
+       auto resView = static_cast<D3D11ShaderResourceView*>(ppResources[i]);
+ 
+-      if (bindings.views[StartSlot + i] != resView) {
++      if (bindings.views[StartSlot + i] != resView || IsXboxBundle()) {
+         if (likely(resView != nullptr)) {
+           if (unlikely(resView->TestHazards())) {
+             if (TestSrvHazards<ShaderStage>(resView))
+@@ -5364,7 +5366,7 @@
+     for (uint32_t i = 0; i < NumSamplers; i++) {
+       auto sampler = static_cast<D3D11SamplerState*>(ppSamplers[i]);
+ 
+-      if (bindings.samplers[StartSlot + i] != sampler) {
++      if (bindings.samplers[StartSlot + i] != sampler || IsXboxBundle()) {
+         bindings.samplers[StartSlot + i] = sampler;
+ 
+         if (!DirtySampler(ShaderStage, StartSlot + i, !sampler))
