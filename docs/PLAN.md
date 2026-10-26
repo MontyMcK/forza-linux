@@ -171,6 +171,12 @@ The hardest phase. The order matters.
 - [x] **Draw bundles:** deferred contexts created with flag bit 17 inherit the executing context's state: DXVK patch tools/dxvk-patches/0001-xbox-draw-bundles.patch (FINDINGS §5b). The 3D scene now renders.
 - [x] **Tonemap writes 0:** not a rendering bug: the camera fade stays black because the intro waits for FMOD streams (FINDINGS §4). With the wait forced (debug) the game fades in and reaches the world.
 - [ ] Deferred/G-buffer geometry: lit objects are black silhouettes and the main depth reads 1.0 at post-processing.
+  - [x] Shadow maps were never cleared (DMA fills): fixed, foliage is lit now.
+  - [x] Write tracking lost writes to small buffers sharing a page (page → resources index, `force_dirty`).
+  - [x] Bundles recorded stale placement uploads (re-sync at ExecuteCommandList).
+  - [x] SetShaderResourceViewMinLOD (slot 223) emulated with a clamped view.
+  - [ ] **Near terrain is not drawn** (the world-edge mesh shows through, khaki). Find the terrain draws (FL_TRACE_PIXEL on a far-terrain pixel, FL_TRACE_BUNDLES) and why the near ones are missing.
+  - [ ] **The player car is not drawn**: the car layer's D16 depth (tonemap t10) is never a render target; only its AO decal (12-index box, stencil ref 128) is. Pedestrians render black.
 - [ ] ESRAM aliasing: resources share ESRAM offsets (FINDINGS §5b); find out whether any pass reads through an alias what another wrote.
 - [ ] Untiler speed: per-element addrlib calls are fine for BC textures, slow for big uncompressed ones; cache the per-macro-tile pattern.
 - [ ] GPU→CPU: placement memory the GPU writes (render targets the CPU reads back) is not synced back.
@@ -189,7 +195,8 @@ Milestones: (a) clear-colour frame, (b) the 2D boot logos/menus, (c) the 3D gara
 Azimuth runs the game because the GPU reads the game's memory directly. Our copy-and-track model is what keeps breaking. In order:
 - [x] **Change tracking without mprotect.** gpumem now uses userfaultfd async write-protect + `PAGEMAP_SCAN` (the Linux GetWriteWatch). No fault hook, kernel writes are recorded. `FL_CHECK_TRACKING=1` hashes every skipped upload to catch misses.
 - [x] DMA engine context: every slot the game uses (9, 10, 16–19, 21, 22, 24; FINDINGS §3.1) runs on the CPU or on the immediate DXVK context (dma.cpp).
-- [ ] DMA fills/copies into GPU-owned placement resources (depth clears: HTILE 0xffffffff + depth 1.0f, rva 0x1131b85) must become ClearDepthStencilView / copies on the DXVK resource; today they only reach game memory.
+- [x] DMA fills into GPU-owned placement depth/stencil planes become ClearDepthStencilView (dma.cpp `fill_gpu_owned`; the per-frame shadow-map clears). HTILE fills are dropped.
+  - [ ] Fills of GPU-owned colour planes, partial plane fills, and CopyMemoryToMemory over GPU-owned memory: logged UNIMPLEMENTED, not seen yet.
 - [ ] **Zero-copy placement buffers.** Import the game's memory into Vulkan with VK_EXT_external_memory_host (RADV supports it) and create the DXVK buffer over it: needs a small interop entry point in our DXVK build (third_party/dxvk), page-aligned import ranges (title memory reserved in 64 KB-aligned chunks), and GPU→CPU visibility for free. Decide with the user: patch DXVK, or move to D3D12 on vkd3d-proton like Azimuth (`OpenExistingHeapFromAddress` exists there).
 - [ ] ESRAM with a real shared backing (memfd + MAP_SHARED views) so aliased mappings agree.
 - [ ] Title memory bookkeeping: one reservation for graphics memory; releases withdraw GPU heaps over them (Azimuth "withdraw the heaps over title memory").
@@ -199,7 +206,7 @@ Azimuth runs the game because the GPU reads the game's memory directly. Our copy
 - [x] `ActivateAudioInterfaceAsync` → our `IAudioClient2`/`IAudioRenderClient`/`IAudioClock`, backed by an SDL3 audio stream (48 kHz float stereo, PipeWire). FMOD's output path (FINDINGS §4). `FL_AUDIO=null` drops audio.
 - [x] AcpHal heaps, SHAPE context arrays, IAcpHal command/message queues with a 128-sample ACP clock (FINDINGS §4).
 - [ ] **Blocks the intro:** FMOD XMA streams must load (EventInstance::getStreamLoadingState == LOADED) or the IE cutscene never becomes ready (FINDINGS §4). Needs the SHAPE/XMA emulation below.
-- [ ] SHAPE flowgraph execution: decode the SHAPE commands FMOD puts in its 0x3000-byte flowgraph buffer and the 64-byte XMA contexts, then decode **XMA2** with FFmpeg's `xma2` decoder (Azimuth uses a modified FFmpeg: one stream per decoder, every frame output immediately; check whether Fedora's ffmpeg-free has xma2).
+- [ ] SHAPE flowgraph execution: decode the SHAPE commands FMOD puts in its 0x3000-byte flowgraph buffer and the 64-byte XMA contexts, then decode **XMA2** with FFmpeg's `xma2` decoder (Azimuth uses a modified FFmpeg: one stream per decoder, every frame output immediately; Fedora's ffmpeg-free has no xma1/xma2/wmapro decoders (checked 2026-10-26 with avcodec_find_decoder_by_name): build a minimal FFmpeg with only those (LGPL, like dxvk in third_party)).
 - [ ] `xaudio2_9.dll` (dynamically loaded): provide it from the HLE registry via **FAudio**, which implements the XAudio2 API, if the game actually loads it.
 - [ ] Media Foundation `MFCreateSourceReaderFromURL`: find out what it plays. Stub or implement with FFmpeg.
 - [ ] Bink runs as game code, so it should just work once audio and textures work.

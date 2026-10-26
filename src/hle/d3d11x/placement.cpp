@@ -3,6 +3,7 @@
 // descriptor, ORs an internal flag into MiscFlags, creates an ordinary resource
 // and binds it to the game's address. We create an ordinary DXVK resource and
 // copy the game memory into it when it changed (gpumem.h).
+#include <algorithm>
 #include <cstdlib>
 #include <atomic>
 #include <cstring>
@@ -17,6 +18,7 @@
 #include "hle/xg/xg.h"
 
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -38,6 +40,43 @@ constexpr UINT kGpuWriteBinds = 0x20 | 0x40 | 0x80;  // RENDER_TARGET | DEPTH_ST
 // resource (another reference) instead of a new copy.
 std::mutex g_placed_mutex;
 std::unordered_map<uintptr_t, Resource*> g_placed;
+
+// CPU-written placement resources by 4 KiB page: write tracking is per page,
+// and small resources (constant buffers) share pages. Guarded by g_placed_mutex.
+std::unordered_map<uint64_t, std::vector<Resource*>> g_page_users;
+
+template <typename F>
+void for_pages(const Resource* r, F f) {
+    uint64_t a = reinterpret_cast<uint64_t>(r->place);
+    for (uint64_t p = a >> 12, e = (a + (r->place_size ? r->place_size : 1) - 1) >> 12; p <= e; p++) f(p);
+}
+
+void page_index_add(Resource* r) {
+    std::lock_guard lock(g_placed_mutex);
+    for_pages(r, [&](uint64_t p) { g_page_users[p].push_back(r); });
+}
+
+void page_index_remove(Resource* r) {
+    for_pages(r, [&](uint64_t p) {
+        auto it = g_page_users.find(p);
+        if (it == g_page_users.end()) return;
+        auto& v = it->second;
+        v.erase(std::remove(v.begin(), v.end(), r), v.end());
+        if (v.empty()) g_page_users.erase(it);
+    });
+}
+
+// begin_upload callback: pages [start, end) were written and are re-armed now;
+// every other resource on them still has to upload those writes.
+void mark_page_neighbours(uint64_t start, uint64_t end, void* self) {
+    std::lock_guard lock(g_placed_mutex);
+    for (uint64_t p = start >> 12; p < (end + 0xfff) >> 12; p++) {
+        auto it = g_page_users.find(p);
+        if (it == g_page_users.end()) continue;
+        for (Resource* o : it->second)
+            if (o != self) o->force_dirty.store(true, std::memory_order_relaxed);
+    }
+}
 
 Resource* find_identical(int dim, const uint32_t* xd, size_t xd_size, UINT tile_mode, UINT pitch, void* addr) {
     std::lock_guard lock(g_placed_mutex);
@@ -68,8 +107,8 @@ HRESULT create_placement(Iface* self, int dim, const uint32_t* xd, UINT tile_mod
     UINT bind = xd[dim == 1 ? 2 : dim == 2 ? 5 : dim == 3 ? 8 : 6];
     r->gpu_owned = (bind & kGpuWriteBinds) != 0;
     if (dim == 1) {
-        r->place_size = xd[0];  // ByteWidth
-        if (!r->gpu_owned) gpumem::track(r->place, r->place_size);
+        r->place_size = r->place_total = xd[0];  // ByteWidth
+        if (!r->gpu_owned) gpumem::track(r->place, r->place_size), page_index_add(r);
     } else {
         // The same layout our xg_x hands the game, so texels are where it put them.
         xg::TexDesc t{};
@@ -83,12 +122,26 @@ HRESULT create_placement(Iface* self, int dim, const uint32_t* xd, UINT tile_mod
         if (!xg::layout_for(t, &r->tex_desc, &r->tex_layout))
             fatal("d3d: placement texture layout failed (dim %d fmt %u tile %u)", dim, t.format, tile_mode);
         r->place_size = r->tex_layout.size;
-        if (!r->gpu_owned) gpumem::track(r->place, r->place_size);
+        if (!xg::plane_spans(t, r->planes, &r->num_planes, &r->place_total)) r->place_total = r->place_size;
+        if (!r->gpu_owned) gpumem::track(r->place, r->place_size), page_index_add(r);
     }
     FL_LOG(d3d, "placement dim %d at %p size 0x%zx tile %u pitch %u bind 0x%x", dim, addr, r->place_size, tile_mode,
            pitch, bind);
     {
         std::lock_guard lock(g_placed_mutex);
+        // FL_LOG=alias: placement resources over the same memory with different
+        // descriptors are separate DXVK resources here, so GPU writes through
+        // one never show in the other.
+        if (log_enabled("alias")) {
+            uintptr_t a = reinterpret_cast<uintptr_t>(addr), e = a + r->place_size;
+            for (auto& [oa, o] : g_placed) {
+                if (o == r || oa >= e || oa + o->place_size <= a) continue;
+                if (!o->gpu_owned && !r->gpu_owned) continue;
+                std::string mine = trace::describe_dxvk(r->dxvk);
+                FL_LOG(alias, "[%s] at %p+0x%zx overlaps live [%s] at %p+0x%zx", mine.c_str(), addr, r->place_size,
+                       trace::describe_dxvk(o->dxvk), (void*)oa, o->place_size);
+            }
+        }
         g_placed[reinterpret_cast<uintptr_t>(addr)] = r;  // the newest resource at an address owns it
     }
     return hr;
@@ -147,8 +200,9 @@ void sync_placement(void* dxvk_ctx, Resource* r) {
         for (size_t i = 0; i < n; i++) h = (h ^ p[i]) * 1099511628211ull;
         return h;
     };
-    if (!gpumem::dirty(r->place, r->place_size)) {
-        if (check && r->upload_hash && gpumem::mapped(r->place, r->place_size) && r->place_size <= (1u << 20) &&
+    bool forced = r->force_dirty.exchange(false, std::memory_order_relaxed);
+    if (!forced && !gpumem::dirty(r->place, r->place_size)) {
+        if (check && r->upload_hash && r->place_size <= (1u << 20) && gpumem::readable(r->place, r->place_size) &&
             hash(r->place, r->place_size) != r->upload_hash) {
             static std::atomic<int> reported{0};
             if (reported++ < 20)
@@ -163,8 +217,9 @@ void sync_placement(void* dxvk_ctx, Resource* r) {
         log_once("placement resource bound over released memory (not uploaded)", 0);
         return;
     }
-    gpumem::begin_upload(r->place, r->place_size);
-    if (check && r->place_size <= (1u << 20)) r->upload_hash = hash(r->place, r->place_size);
+    gpumem::begin_upload(r->place, r->place_size, &mark_page_neighbours, r);
+    if (check && r->place_size <= (1u << 20) && gpumem::readable(r->place, r->place_size))
+        r->upload_hash = hash(r->place, r->place_size);
     FL_LOG(upload, "placement upload [%s] dim %d at %p size 0x%zx tile %u", trace::describe_dxvk(r->dxvk), r->dim,
            static_cast<void*>(r->place), r->place_size, r->tile_mode);
     if (trace::active()) trace::event("upload placement [%s]", trace::describe_dxvk(r->dxvk));
@@ -205,8 +260,19 @@ void sync_placement(void* dxvk_ctx, Resource* r) {
     }
 }
 
+Resource* placement_containing(uint64_t addr) {
+    std::lock_guard lock(g_placed_mutex);
+    for (auto& [a, r] : g_placed)
+        if (addr >= a && addr - a < std::max(r->place_total, uint64_t(r->place_size))) {
+            r->add_ref();
+            return r;
+        }
+    return nullptr;
+}
+
 void placement_forget(Resource* r) {
     std::lock_guard lock(g_placed_mutex);
+    if (!r->gpu_owned) page_index_remove(r);
     auto it = g_placed.find(reinterpret_cast<uintptr_t>(r->place));
     if (it != g_placed.end() && it->second == r) g_placed.erase(it);
 }

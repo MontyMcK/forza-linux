@@ -55,13 +55,15 @@ long scan(uint64_t start, uint64_t end, bool wp, page_region* out, uint64_t n, u
     return r;
 }
 
-// Write-protect every written page of [start, end).
-bool rearm(uint64_t start, uint64_t end) {
+// Write-protect every written page of [start, end), reporting each region.
+bool rearm(uint64_t start, uint64_t end, WrittenFn on_written, void* user) {
     page_region r[32];
     while (start < end) {
         uint64_t walk_end = end;
         long n = scan(start, end, true, r, 32, &walk_end);
         if (n < 0) return false;
+        if (on_written)
+            for (long i = 0; i < n; i++) on_written(r[i].start, r[i].end, user);
         if (walk_end <= start) break;  // no progress: done
         start = walk_end;
     }
@@ -134,16 +136,16 @@ bool readable(const void* addr, size_t size) {
     return true;
 }
 
-void begin_upload(const void* addr, size_t size) {
+void begin_upload(const void* addr, size_t size, WrittenFn on_written, void* user) {
     if (!g_enabled) return;
     static const bool no_wp = getenv("FL_UFFD_NO_WP") != nullptr;  // bisect aid
     if (no_wp) return;
     uint64_t start, end;
     page_range(addr, size, &start, &end);
-    if (rearm(start, end)) return;
+    if (rearm(start, end, on_written, user)) return;
     // Part of the range lost its registration: the game decommitted or
     // remapped it (a new mapping). Register it again and re-arm.
-    if (errno == EPERM && register_range(start, end) && rearm(start, end)) return;
+    if (errno == EPERM && register_range(start, end) && rearm(start, end, on_written, user)) return;
     FL_LOG(d3d, "gpumem: re-arming %p+0x%llx failed (%s); it stays dirty", reinterpret_cast<void*>(start),
            (unsigned long long)(end - start), strerror(errno));
 }

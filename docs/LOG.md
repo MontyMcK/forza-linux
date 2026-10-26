@@ -191,3 +191,19 @@ Found:
 Tools: `FL_BREAK_RETURN=<rva>=<value>` (forced return), `FL_BREAK_AFTER=<s>`, `FL_BREAK_RET=<rva>` (filter by return address), `FL_BREAK_DUMP=<off>:<len>|*<off>+<off>:<len>`, `FL_BREAK_PTRVEC=<off>:<stride>`, `FL_BREAK_RDXF=1`, `FL_BREAK_DEREF` in repeat mode; `FL_DEBUG_NULL_SRV=<ps fnv>:<slots>`; trace logs ClearDepthStencilView.
 
 Next step: make FMOD XMA streams load and play: emulate SHAPE XMA contexts (FMOD's "FMOD XMA Codec"; Azimuth: XmaVoice/XmaDecoder, FFmpeg) with an FFmpeg built with the xma2 decoder (Fedora's lacks it). Then the black lit geometry.
+
+## 2026-10-26 (night): Claude: pause menu closes; bundle uploads, shared pages, shadow maps; the world is lit
+
+Did:
+- **Pause menu.** The game kept itself paused (States::WaitForPause) because CoreWindow never raised VisibilityChanged/Activated; Xbox ICoreWindow S+9/S+10 are add/remove_Activated (was mislabelled put_PointerCursor). Both events are raised once after activation (FINDINGS §4b). The game reaches gameplay ("DRIVE THE HURACÁN TO THE FESTIVAL!").
+- **Bundles bake placement uploads in.** Uploading a placement resource while recording a bundle put a stale copy into the command list. Deferred contexts now record which placement resources they bind; ExecuteCommandList syncs them first (context.cpp, `recorded_placements`). Trees got their textures.
+- **Write tracking on shared pages.** `FL_CHECK_TRACKING=1` found writes the tracker missed: re-arming one small constant buffer's 4 KiB page also cleared its neighbours' written state. placement.cpp keeps a page → resources index and marks the neighbours `force_dirty` when an upload re-arms written pages. The check now reports 0 missed writes (it reads only committed memory; it is slow, ~1 fps).
+- **Shadow maps were never cleared.** The game clears its three placement shadow maps (1536² and 2×1024² D32, ESRAM-less, gpu-owned) every frame with DMA FillMemoryWithValue (HTILE 0xffffffff, depth 1.0f). Our fill only wrote game memory, so DXVK's copies stayed 0 and everything was in full shadow. dma.cpp now turns a fill of a GPU-owned depth/stencil plane into ClearDepthStencilView (planes from xg::plane_spans). Sunlight is back on trees and grass.
+- **SetShaderResourceViewMinLOD** (context slot 223) is emulated with a view whose first mip is ceil(min LOD) (DXVK ignores SetResourceMinLOD). The game clamps ~1300 views (mips 1–4) while it streams the big mips. No visible change yet, but needed.
+- Tools: `FL_LOG=alias` (placement resources overlapping a GPU-owned one: none found), `FL_TRACE_DUMP_DRAWS=a-b/step` (RT dumps for a draw range, `_eN` after command lists), trace logs all 128 SRV slots (materials sit in t16–t23, shared inputs up to t116), `FL_TRACE_MIPS=1` (per-mip U/Z/D state of placement textures), `FL_TRACE_PIXEL=x,y` (logs each draw that changes one RT0 pixel), `FL_LOG=lod`.
+
+Found:
+- The khaki "wall" on the right half of the screen is a world-edge mesh (main-pass draw with VB x = -8577.8, y 0..20699): visible because the near terrain is not drawn at all.
+- The car layer's D16 depth (tonemap t10) is never rendered to: no draw uses it, so the car is not drawn as a car; the black shape is in the main pass.
+
+Broken: near terrain missing; the car and pedestrians black; audio (XMA) silent, intro still needs `FL_BREAK=0x17469a0 FL_BREAK_RETURN=0x17469a0=1`.

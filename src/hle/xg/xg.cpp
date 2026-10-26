@@ -350,6 +350,19 @@ bool layout_for(const TexDesc& t, gcn::SurfaceDesc* d, gcn::Layout* l) {
     return true;
 }
 
+bool plane_spans(const TexDesc& t, PlaneSpan out[3], int* count, uint64_t* total) {
+    Computer* c = nullptr;
+    if (create_computer(t, &c) < 0) return false;
+    *count = static_cast<int>(c->layout.planes);
+    for (int i = 0; i < *count && i < 3; i++) {
+        const PlaneLayout& p = c->layout.plane[i];
+        out[i].usage = p.usage, out[i].offset = p.base_offset_bytes, out[i].size = p.size_bytes;
+    }
+    *total = c->layout.size_bytes;
+    comp_Release(c);
+    return true;
+}
+
 HLE_EXPORT(xg_x, XGComputeOptimalTileMode, XGComputeOptimalTileMode_);
 HLE_EXPORT(xg_x, XGComputeOptimalDepthStencilTileModes, XGComputeOptimalDepthStencilTileModes_);
 HLE_EXPORT(xg_x, XGCreateTexture1DComputer, XGCreateTexture1DComputer_);

@@ -4,6 +4,10 @@
 // (umd copies both into the same internal slots for every resource type;
 // probably ESRAM offset/size, FINDINGS §3.1). Xbox-only flag bits are stripped
 // before DXVK sees them, and logged once.
+#include <algorithm>
+#include <cmath>
+#include <mutex>
+#include <unordered_map>
 #include <cstdio>
 #include <cstring>
 
@@ -157,16 +161,31 @@ WINAPI HRESULT dev_CreateTexture3D(Iface* self, const uint32_t* xd, const void* 
 
 // ---- Views (Xbox: 8 GetResource, 9 GetDesc; umd 0x117970 etc.) ----
 
+// All view types share the desktop GetDesc slot (7: after ID3D11View::GetResource).
+constexpr int kDesktopViewGetDesc = 8;
+constexpr int kViewGetDescSlot = kDesktopViewGetDesc;
+
 struct View : DeviceChild {
     View(const char16_t* name, DeviceX* dev, Vtable& vt, void* obj, DeviceChild* resource, int desc_slot)
-        : DeviceChild(name, dev, vt, obj), res(resource), desktop_getdesc(desc_slot) {
+        : DeviceChild(name, dev, vt, obj), res(resource), desktop_getdesc(desc_slot), full(obj) {
         res->add_ref();
         expose(IID_ID3D11View, &iface);
     }
-    ~View() override { res->release(); }
+    ~View() override {
+        dxvk = full;  // the base class releases it
+        for (auto& [k, obj] : clamped) unregister_alias(obj, this), dx_release(obj);
+        res->release();
+    }
     Resource* backing() override { return res->backing(); }
     DeviceChild* res;
     int desktop_getdesc;
+    // SetShaderResourceViewMinLOD: `dxvk` then points at a view of the same
+    // resource that starts `min_mip` mips further down; `full` is the view
+    // the game created. Clamped views are kept (by first mip) until the view
+    // dies: command lists recorded with one still reference it.
+    void* full;
+    std::mutex clamp_mutex;
+    std::unordered_map<uint32_t, void*> clamped;
 };
 
 WINAPI void view_GetResource(Iface* self, void** out) {
@@ -190,8 +209,7 @@ Vtable& rtv_vt() { static Vtable v = make_view_vt("ID3D11RenderTargetViewX"); re
 Vtable& dsv_vt() { static Vtable v = make_view_vt("ID3D11DepthStencilViewX"); return v; }
 Vtable& uav_vt() { static Vtable v = make_view_vt("ID3D11UnorderedAccessViewX"); return v; }
 
-// All view types share the desktop GetDesc slot (7: after ID3D11View::GetResource).
-constexpr int kDesktopViewGetDesc = 8;
+
 
 HRESULT create_view(Iface* self, int desktop_slot, const void* res, const void* desc, void** out, Vtable& vt,
                     const char16_t* name, const GUID& iid, const char* what) {
@@ -246,6 +264,57 @@ HRESULT create_view(Iface* self, int desktop_slot, const void* res, const void* 
     }
     return hr;
 }
+
+}  // namespace
+
+// Xbox context slot 223 SetShaderResourceViewMinLOD(view, float): umd 0x17e60
+// writes the clamp into the view's T# (MIN_LOD, word 1 bits 8-19, 4.8 fixed
+// point, in resource mips, at least the view's first mip), so every later bind of the
+// view samples no finer mip than that. The game's texture streamer uses it to
+// keep the GPU off big mips that have not arrived (their memory holds zeros,
+// which BC7 decodes to transparent black). D3D11 has no per-view clamp and
+// DXVK ignores SetResourceMinLOD, so we swap in a view whose most detailed mip
+// is ceil(min_lod): for sampling with derivatives that picks the same mip as
+// the clamp. STUB: Load/GetDimensions see the clamped view's mip numbering.
+void srv_set_min_lod(void* game_view, float min_lod) {
+    auto* v = static_cast<View*>(child_of(game_view));
+    struct { uint32_t format, dim, u[4]; } d{};
+    dx<void>(v->full, kViewGetDescSlot, &d);
+    bool has_mips = d.dim >= 2 && d.dim <= 10 && d.dim != 6 && d.dim != 7;  // not buffers or MSAA
+    if (!has_mips) return;
+    // The clamp counts resource mips, not view mips (umd raises it to the
+    // view's first mip and stores it as 4.8 fixed point in T# word 1 bits 8-19).
+    uint32_t base = d.u[0], levels = d.u[1];
+    uint32_t first = min_lod > 0 ? static_cast<uint32_t>(std::ceil(std::min(min_lod, 15.996f))) : 0;
+    uint32_t k = first > base ? first - base : 0;
+    if (levels && k > levels - 1) k = levels - 1;
+    FL_LOG(lod, "view %p [%s] min LOD %.2f -> first mip %u of %u", game_view, trace::describe_dxvk(v->res->dxvk),
+           min_lod, base + k, base + levels);
+    if (k == 0) {
+        v->dxvk = v->full;
+        return;
+    }
+    std::lock_guard lock(v->clamp_mutex);
+    if (auto it = v->clamped.find(k); it != v->clamped.end()) {
+        v->dxvk = it->second;
+        return;
+    }
+    d.u[0] += k;
+    d.u[1] = levels - k;
+    void* obj = nullptr;
+    HRESULT hr = dx<HRESULT>(v->device->dxvk, dd::CreateShaderResourceView, v->res->dxvk, &d, &obj);
+    if (hr < 0) {
+        FL_ERROR("d3d: SetShaderResourceViewMinLOD: clamped view (first mip %u) failed: 0x%08x", d.u[0],
+                 static_cast<uint32_t>(hr));
+        return;
+    }
+    log_once("STUB: SetShaderResourceViewMinLOD emulated with a view starting at the clamped mip", 0);
+    v->clamped[k] = obj;
+    register_alias(obj, v);
+    v->dxvk = obj;
+}
+
+namespace {
 
 WINAPI HRESULT dev_CreateShaderResourceView(Iface* self, const void* res, const void* desc, void** out) {
     return create_view(self, dd::CreateShaderResourceView, res, desc, out, srv_vt(), u"D3D11ShaderResourceView",

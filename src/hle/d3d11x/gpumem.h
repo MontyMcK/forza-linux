@@ -37,6 +37,10 @@ bool readable(const void* addr, size_t size);
 
 // Call right BEFORE copying the range to the GPU: re-arms tracking. Writes
 // that race with the copy mark their page written again, so nothing is lost.
-void begin_upload(const void* addr, size_t size);
+// on_written (optional) gets each page range that was written and is now
+// re-armed: other resources sharing those pages must be marked dirty by the
+// caller, since the re-arm also clears the pages for them.
+using WrittenFn = void (*)(uint64_t start, uint64_t end, void* user);
+void begin_upload(const void* addr, size_t size, WrittenFn on_written = nullptr, void* user = nullptr);
 
 }  // namespace fl::d3d::gpumem

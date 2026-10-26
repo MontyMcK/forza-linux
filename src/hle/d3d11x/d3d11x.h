@@ -16,6 +16,7 @@
 
 #include "hle/winrt/object.h"
 #include "hle/xg/gcn.h"
+#include "hle/xg/xg.h"
 
 namespace fl::d3d {
 
@@ -78,6 +79,9 @@ struct DeviceChild : winrt::Object {
 
 // The wrapper for a DXVK object, or nullptr.
 DeviceChild* wrapper_of(void* dxvk_obj);
+// Another DXVK object that stands for wrapper `w` (wrapper_of finds it).
+void register_alias(void* dxvk_obj, DeviceChild* w);
+void unregister_alias(void* dxvk_obj, DeviceChild* w);
 // Game interface pointer -> DXVK object (nullptr stays nullptr). Aborts on foreign objects.
 void* unwrap(const void* game_iface);
 DeviceChild* child_of(const void* game_iface);
@@ -100,11 +104,17 @@ struct Resource : DeviceChild {
     uint8_t* place = nullptr;
     size_t place_size = 0;     // bytes of game memory the resource covers (0 = unknown)
     uint64_t upload_hash = 0;  // FL_CHECK_TRACKING: hash of the last upload
+    // Set when another resource's upload re-armed a page this one shares (its
+    // pending writes would otherwise be lost): upload at the next sync.
+    std::atomic<bool> force_dirty{false};
     uint32_t tile_mode = 0;    // index into the GCN tile mode table (textures)
     uint32_t pitch = 0;        // in elements, 0 = default
     bool gpu_owned = false;    // render target / depth / UAV: the GPU writes it, never upload
     gcn::SurfaceDesc tex_desc; // placement textures: how the game memory is laid out
     gcn::Layout tex_layout;
+    xg::PlaneSpan planes[3];   // placement textures: all planes (HTILE, depth, stencil...)
+    int num_planes = 0;
+    uint64_t place_total = 0;  // placement: bytes of all planes (place_size is the main plane)
     const uint32_t* desc32() const { return reinterpret_cast<const uint32_t*>(xdesc); }
 };
 
@@ -120,6 +130,8 @@ void* make_adapter(void* dxvk_adapter);      // dxgi.cpp: wraps an IDXGIAdapter
 void sync_placement(void* dxvk_ctx, Resource* r);
 // A placement resource is going away: forget it as the owner of its address.
 void placement_forget(Resource* r);
+// The live placement resource whose memory contains `addr` (a new reference), or nullptr.
+Resource* placement_containing(uint64_t addr);
 inline void sync_for_gpu(void* dxvk_ctx, DeviceChild* c) {
     if (Resource* r = c ? c->backing() : nullptr)
         if (r->place) sync_placement(dxvk_ctx, r);
@@ -149,6 +161,11 @@ struct ContextX {
     bool deferred = false;
     std::atomic<ULONG> refs{1};
     bool slot196_flag = false;
+    // Deferred contexts: placement resources bound while recording (one
+    // reference each). FinishCommandList hands them to the command list, whose
+    // every ExecuteCommandList re-syncs them: bundles are recorded once and
+    // replayed, so binds inside them never reach sync_placement again.
+    std::vector<struct Resource*> recorded_placements;
 
     static ContextX* from(void* self) { return reinterpret_cast<ContextX*>(self); }
     void** table() { return reinterpret_cast<void**>(block + kTable); }
@@ -167,6 +184,9 @@ struct DeviceX : winrt::Object {
     void* dxvk = nullptr;       // DXVK ID3D11Device
     PrivateData priv;
 };
+
+// Xbox SetShaderResourceViewMinLOD: clamp the mips this SRV samples (resources.cpp).
+void srv_set_min_lod(void* game_view, float min_lod);
 
 // Slot fillers implemented in the other files.
 void add_resource_methods(winrt::Vtable& device_vt);  // resources.cpp

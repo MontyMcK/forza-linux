@@ -4,6 +4,7 @@
 // (IASetPrimitiveTopology) has no slot, Xbox = desktop for 25..143, and
 // 144..260 are Xbox-only. ctx_slot() converts. Signatures are desktop unless a
 // comment says otherwise.
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -44,8 +45,13 @@ __attribute__((noinline)) void note_context_user(ContextX* c) {
     }
 }
 
+// The context whose method runs on this thread (bind_unwrap records
+// placement binds of deferred contexts through it).
+thread_local C* t_current = nullptr;
+
 __attribute__((always_inline)) inline void* ctxdx(void* self) {
     C* c = C::from(self);
+    t_current = c;
     static const bool check = log_enabled("ctxthreads");
     if (check) note_context_user(c);
     return c->dxvk;
@@ -57,6 +63,19 @@ ULONG add_ref(C* c) { return c->deferred ? ++c->refs : c->device->add_ref(); }
 void* bind_unwrap(void* ctx, const void* obj) {
     DeviceChild* c = child_of(obj);
     if (!c) return nullptr;
+    if (C* cur = t_current; cur && cur->deferred && cur->dxvk == ctx) {
+        // Recording: an upload here would be baked into the command list and
+        // replayed with stale data on every execution. Note the resource; the
+        // executing context syncs it right before the list runs.
+        if (Resource* r = c->backing(); r && r->place && !r->gpu_owned) {
+            auto& v = cur->recorded_placements;
+            if (std::find(v.begin(), v.end(), r) == v.end()) {
+                r->add_ref();
+                v.push_back(r);
+            }
+        }
+        return c->dxvk;
+    }
     sync_for_gpu(ctx, c);
     return c->dxvk;
 }
@@ -173,8 +192,9 @@ WINAPI HRESULT ctx_SetPrivateDataInterface(void* self, const GUID& g, void* unkn
         Unwrapped u(ctxdx(self), samplers, n);                                                                            \
         dx<void>(ctxdx(self), dc::S##SetSamplers, start, n, u.p);                                            \
     }                                                                                                        \
-    WINAPI void ctx_##S##SetShader(void* self, void* shader, void* const* inst, UINT n) {                    \
-        if (n) log_once(#S "SetShader with class instances (ignored)", n);                                    \
+    /* umd's xSSetShader (e.g. VS umd 0x9320, PS 0x91f0) only stores the shader: the class-instance     \
+       arguments are ignored on the console (the game leaves garbage in them). */                            \
+    WINAPI void ctx_##S##SetShader(void* self, void* shader, void* const*, UINT) {                          \
         dx<void>(ctxdx(self), dc::S##SetShader, unwrap(shader), nullptr, 0u);                                \
     }                                                                                                        \
     WINAPI void ctx_##S##GetConstantBuffers(void* self, UINT start, UINT n, void** bufs) {                   \
@@ -428,6 +448,8 @@ WINAPI void ctx_ClearDepthStencilView(void* self, void* dsv, UINT flags, float d
 }
 WINAPI void ctx_GenerateMips(void* self, void* srv) { dx<void>(ctxdx(self), dc::GenerateMips, unwrap(srv)); }
 WINAPI void ctx_SetResourceMinLOD(void* self, void* res, float lod) {
+    // STUB: DXVK ignores SetResourceMinLOD (the game clamps per view, slot 223).
+    log_once("STUB: SetResourceMinLOD is ignored by DXVK", 0);
     dx<void>(ctxdx(self), dc::SetResourceMinLOD, unwrap(res), lod);
 }
 WINAPI float ctx_GetResourceMinLOD(void* self, void* res) {
@@ -554,6 +576,16 @@ winrt::Vtable& cmdlist_vt() {
     return v;
 }
 
+struct CommandList : DeviceChild {
+    CommandList(DeviceX* dev, void* dxvk_list) : DeviceChild(u"D3D11CommandList", dev, cmdlist_vt(), dxvk_list) {
+        expose(IID_ID3D11CommandList, &iface);
+    }
+    ~CommandList() override {
+        for (Resource* r : placements) r->release();
+    }
+    std::vector<Resource*> placements;  // re-synced at every ExecuteCommandList
+};
+
 WINAPI HRESULT ctx_FinishCommandList(void* self, BOOL restore, void** out) {
     auto* c = C::from(self);
     if (!c->deferred) {
@@ -569,14 +601,25 @@ WINAPI HRESULT ctx_FinishCommandList(void* self, BOOL restore, void** out) {
         if (out) *out = nullptr;
         return hr;
     }
-    auto* w = new DeviceChild(u"D3D11CommandList", c->device, cmdlist_vt(), list);
-    w->expose(IID_ID3D11CommandList, &w->iface);
+    auto* w = new CommandList(c->device, list);
+    w->placements = std::move(c->recorded_placements);
+    c->recorded_placements.clear();
     *out = &w->iface;
     return hr;
 }
 
 WINAPI void ctx_ExecuteCommandList(void* self, void* list, BOOL restore) {
     auto* c = C::from(self);
+    if (auto* cl = static_cast<CommandList*>(child_of(list))) {
+        for (Resource* r : cl->placements) {
+            sync_for_gpu(c->dxvk, r);
+            if (c->deferred && std::find(c->recorded_placements.begin(), c->recorded_placements.end(), r) ==
+                                   c->recorded_placements.end()) {
+                r->add_ref();
+                c->recorded_placements.push_back(r);
+            }
+        }
+    }
     if (trace::active()) {
         void* rtv = nullptr;
         void* dsv = nullptr;
@@ -651,16 +694,9 @@ WINAPI void ctx_IASetPrimitiveResetIndex(void*, uint32_t index) {
 }
 
 // 223 SetShaderResourceViewMinLOD(view, float): a per-view LOD clamp (umd
-// 0x17e60 writes it into the view's T#). D3D11's nearest is the per-resource
-// SetResourceMinLOD, applied to the view's resource.
-WINAPI void ctx_SetShaderResourceViewMinLOD(void* self, void* view, float min_lod) {
-    if (!view) return;
-    void* res = nullptr;
-    dx<void>(unwrap(view), 7 /* ID3D11View::GetResource */, &res);
-    if (!res) return;
-    log_once("SetShaderResourceViewMinLOD -> SetResourceMinLOD on the whole resource", 0);
-    dx<void>(ctxdx(self), dc::SetResourceMinLOD, res, min_lod);
-    dx_release(res);
+// 0x17e60 writes it into the view's T#); see srv_set_min_lod.
+WINAPI void ctx_SetShaderResourceViewMinLOD(void*, void* view, float min_lod) {
+    if (view) srv_set_min_lod(view, min_lod);
 }
 
 // 240 SetResourceCompression(resource, flags): umd 0x17ec0 rewrites the

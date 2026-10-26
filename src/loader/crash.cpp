@@ -448,9 +448,19 @@ static void trap_handler(int, siginfo_t* si, void* uc_) {
             }
             // FL_BREAK_DUMP=<off>:<len>[,<off>:<len>...] (hex): bytes at rcx+off; an offset
             // written as *<off1>+<off2> follows the pointer at rcx+off1 first.
-            if (c < repeat && getenv("FL_BREAK_DUMP") && g[REG_RCX] > 0x10000) {
+            if (c < repeat && getenv("FL_BREAK_DUMP")) {
                 for (const char* p = getenv("FL_BREAK_DUMP"); *p;) {
                     uint64_t addr = g[REG_RCX];
+                    // optional register prefix: rax@ rbx@ rdx@ rdi@ rsi@ r8@ (default rcx)
+                    static const struct { const char* name; int reg; } kRegs[] = {
+                        {"rax@", REG_RAX}, {"rbx@", REG_RBX}, {"rdx@", REG_RDX}, {"rdi@", REG_RDI},
+                        {"rsi@", REG_RSI}, {"r8@", REG_R8}, {"rcx@", REG_RCX}};
+                    for (auto& r : kRegs)
+                        if (!strncmp(p, r.name, strlen(r.name))) {
+                            addr = g[r.reg];
+                            p += strlen(r.name);
+                            break;
+                        }
                     bool indirect = *p == '*';
                     if (indirect) p++;
                     uint64_t off = strtoull(p, const_cast<char**>(&p), 16);

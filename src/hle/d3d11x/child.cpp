@@ -159,6 +159,17 @@ void DeviceChild::destroy() {
     magic = kDeadMagic;
 }
 
+void register_alias(void* dxvk_obj, DeviceChild* w) {
+    std::lock_guard lock(g_reg_mutex);
+    g_registry[dxvk_obj] = w;
+}
+
+void unregister_alias(void* dxvk_obj, DeviceChild* w) {
+    std::lock_guard lock(g_reg_mutex);
+    auto it = g_registry.find(dxvk_obj);
+    if (it != g_registry.end() && it->second == w) g_registry.erase(it);
+}
+
 DeviceChild* wrapper_of(void* dxvk_obj) {
     if (!dxvk_obj) return nullptr;
     std::lock_guard lock(g_reg_mutex);

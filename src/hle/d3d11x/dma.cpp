@@ -115,8 +115,71 @@ WINAPI void dma_CopyMemoryToMemory(Iface*, uint64_t dst, uint64_t src, uint64_t 
     }
 }
 // 22 (umd 0x8fa80): FillMemoryWithValue(dst, bytes, u32 value), in dwords.
-WINAPI void dma_FillMemoryWithValue(Iface*, uint64_t dst, uint64_t bytes, uint32_t value) {
+// A fill over a GPU-owned placement texture (render/depth target): its
+// contents live in DXVK, so the fill must happen there. The game clears its
+// placement shadow maps this way every frame: HTILE with 0xffffffff, then the
+// depth plane with 1.0f. Returns true when the fill was turned into a GPU clear.
+bool fill_gpu_owned(Iface* self, uint64_t dst, uint64_t bytes, uint32_t value) {
+    Resource* r = placement_containing(dst);
+    if (!r) return false;
+    struct Release {
+        Resource* r;
+        ~Release() { r->release(); }
+    } hold{r};
+    if (!r->gpu_owned) return false;
+    uint64_t off = dst - reinterpret_cast<uint64_t>(r->place);
+    const xg::PlaneSpan* p = nullptr;
+    for (int i = 0; i < r->num_planes; i++)
+        if (off >= r->planes[i].offset && off < r->planes[i].offset + r->planes[i].size) p = &r->planes[i];
+    if (!p) {
+        log_once("UNIMPLEMENTED DMA fill inside a GPU-owned resource outside its planes", static_cast<uint32_t>(off));
+        return true;
+    }
+    if (p->usage == 4 /* HTILE */) return true;  // we keep no HTILE: nothing to clear
+    if (p->usage != 7 /* depth */ && p->usage != 8 /* stencil */) {
+        log_once("UNIMPLEMENTED DMA fill of a GPU-owned plane, usage", p->usage);
+        return true;
+    }
+    if (off != p->offset || bytes < p->size) {
+        log_once("UNIMPLEMENTED DMA fill of part of a depth/stencil plane, bytes", static_cast<uint32_t>(bytes));
+        return true;
+    }
+    const uint32_t* d = r->desc32();  // D3D11_TEXTURE2D_DESC
+    if (r->dim != 3) return false;
+    uint32_t fmt = d[4], dsv_fmt = 0;
+    switch (fmt) {
+        case 39: case 40: dsv_fmt = 40; break;  // R32_TYPELESS / D32_FLOAT
+        case 19: case 20: dsv_fmt = 20; break;  // R32G8X24_TYPELESS / D32_FLOAT_S8X24_UINT
+        case 44: case 45: dsv_fmt = 45; break;  // R24G8_TYPELESS / D24_UNORM_S8_UINT
+        case 53: case 55: dsv_fmt = 55; break;  // R16_TYPELESS / D16_UNORM
+    }
+    if (!dsv_fmt || (p->usage == 7 && dsv_fmt != 40 && dsv_fmt != 20)) {
+        log_once("UNIMPLEMENTED DMA depth/stencil fill for format", fmt);
+        return true;
+    }
+    // D3D11_DEPTH_STENCIL_VIEW_DESC: format, dimension, flags, then the union.
+    uint32_t vd[6] = {dsv_fmt, d[5] > 1 ? 6u : 4u, 0, 0, 0, d[3]};  // TEXTURE2D(MS)ARRAY, all slices
+    if (d[5] > 1) vd[3] = 0, vd[4] = d[3];                             // MS array: first slice, count
+    void* dsv = nullptr;
+    HRESULT hr = dx<HRESULT>(r->device->dxvk, desktop::dev::CreateDepthStencilView, r->dxvk, vd, &dsv);
+    if (hr < 0 || !dsv) {
+        FL_ERROR("DMA fill: depth view of [%p fmt %u] failed: 0x%08x", (void*)r, fmt, static_cast<uint32_t>(hr));
+        return true;
+    }
+    float depth;
+    std::memcpy(&depth, &value, sizeof depth);
+    UINT flags = p->usage == 7 ? 1u /* CLEAR_DEPTH */ : 2u /* CLEAR_STENCIL */;
+    FL_LOG(dma, "  -> GPU clear of [%p %ux%u fmt %u] %s %g / 0x%x", (void*)r, d[0], d[1], fmt,
+           flags == 1 ? "depth" : "stencil", depth, value & 0xff);
+    dx<void>(dma_dxvk_context(self), desktop::ctx::ClearDepthStencilView, dsv, flags, depth,
+             static_cast<uint8_t>(value & 0xff));
+    dx_release(dsv);
+    return true;
+}
+
+WINAPI void dma_FillMemoryWithValue(Iface* self, uint64_t dst, uint64_t bytes, uint32_t value) {
     FL_LOG(dma, "FillMemoryWithValue %p, 0x%llx bytes, 0x%x", reinterpret_cast<void*>(dst), (unsigned long long)bytes, value);
+    if (fill_gpu_owned(self, dst, bytes, value)) return;
     std::vector<uint32_t> pattern(std::min<uint64_t>(bytes / 4, 1 << 18), value);
     uint64_t total = bytes & ~uint64_t(3);
     for (uint64_t off = 0; off < total; off += pattern.size() * 4) {

@@ -22,4 +22,13 @@ UINT optimal_tile_mode(UINT dim, UINT format, UINT width, UINT height, UINT arra
 // are relative to that plane. False if the descriptor is invalid.
 bool layout_for(const TexDesc& t, gcn::SurfaceDesc* d, gcn::Layout* l);
 
+// Every plane of the resource as xg_x reports it: XG_PLANE_USAGE (1 colour,
+// 4 HTILE, 7 depth, 8 stencil, ...), byte offset from the resource start, and
+// size. `total` is the whole resource. False if the descriptor is invalid.
+struct PlaneSpan {
+    uint32_t usage = 0;
+    uint64_t offset = 0, size = 0;
+};
+bool plane_spans(const TexDesc& t, PlaneSpan out[3], int* count, uint64_t* total);
+
 }  // namespace fl::xg

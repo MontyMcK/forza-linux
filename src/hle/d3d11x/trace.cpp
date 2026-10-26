@@ -1,10 +1,12 @@
 #include <algorithm>
 #include "hle/d3d11x/trace.h"
+#include "hle/d3d11x/gpumem.h"
 
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <set>
 #include <string>
 
@@ -41,9 +43,34 @@ std::set<void*> g_dumped;  // textures already saved this frame
 uint64_t g_frame = 0;
 uint32_t g_draws = 0;
 
+constexpr int kTraceSrvs = 128;  // D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT
+
 // D3D11 view slots (desktop): 7 GetResource, 8 GetDesc.
 constexpr int kViewGetResource = 7;
 constexpr int kViewGetDesc = 8;
+
+// FL_TRACE_MIPS=1: the state of each mip of a placement texture's game
+// memory: U uncommitted, Z all zero, D data (once per resource per frame).
+std::map<const Resource*, std::string> g_mip_states;
+std::string mip_state(const Resource* r) {
+    static const bool want = getenv("FL_TRACE_MIPS") != nullptr;
+    if (!want) return "?";
+    auto it = g_mip_states.find(r);
+    if (it != g_mip_states.end()) return it->second;
+    std::string out;
+    for (const gcn::MipLayout& m : r->tex_layout.mips) {
+        const uint8_t* p = r->place + m.offset;
+        if (!gpumem::readable(p, m.size)) {
+            out += 'U';
+            continue;
+        }
+        bool zero = true;
+        for (size_t i = 0; i < m.size && zero; i += 8) zero = *reinterpret_cast<const uint64_t*>(p + i) == 0;
+        out += zero ? 'Z' : 'D';
+    }
+    g_mip_states[r] = out;
+    return out;
+}
 
 std::string resource_str(void* dxvk_res) {
     if (!dxvk_res) return "null";
@@ -72,7 +99,9 @@ std::string resource_str(void* dxvk_res) {
     // The two Xbox fields after the desktop descriptor: ESRAM offset and bytes.
     int words = r->dim == 1 ? 6 : r->dim == 2 ? 9 : r->dim == 3 ? 11 : 9;
     if (!r->place && (d[words] || d[words + 1]) && n > 0 && n < (int)sizeof buf)
-        snprintf(buf + n, sizeof buf - n, " esram 0x%x+0x%x", d[words], d[words + 1]);
+        n += snprintf(buf + n, sizeof buf - n, " esram 0x%x+0x%x", d[words], d[words + 1]);
+    if (r->place && r->dim > 1 && !r->gpu_owned && n > 0 && n < (int)sizeof buf && g_active)
+        snprintf(buf + n, sizeof buf - n, " mips %s", mip_state(r).c_str());
     return buf;
 }
 
@@ -110,7 +139,33 @@ float f11(uint32_t v, int mbits) {  // unsigned small float (R11G11B10)
 uint8_t u8(float f) { return static_cast<uint8_t>(std::lround(std::fmin(std::fmax(f, 0.0f), 1.0f) * 255)); }
 
 // Save a 2D texture (mip 0, slice 0) as PNG. Floats are clamped to 0..1.
+void dump_texture_ss(void* ctx, void* tex, const std::string& path);
+
+// Save a 2D texture as PNG; MSAA colour targets are resolved first.
 void dump_texture(void* ctx, void* tex, const std::string& path) {
+    namespace dd = desktop::dev;
+    uint32_t desc[11];
+    dx<void>(tex, 10 /* ID3D11Texture2D::GetDesc */, desc);
+    if (desc[5] <= 1) return dump_texture_ss(ctx, tex, path);
+    uint32_t fmt = desc[4];
+    if (fmt == 19 || fmt == 20 || fmt == 39 || fmt == 40 || fmt == 44 || fmt == 45 || fmt == 53 || fmt == 55) return;
+    uint32_t typed = fmt == 23 ? 24 : fmt == 27 ? 28 : fmt == 9 ? 10 : fmt;  // resolve needs a typed format
+    uint32_t rd[11];
+    std::memcpy(rd, desc, sizeof rd);
+    rd[2] = rd[3] = 1, rd[4] = typed, rd[5] = 1, rd[6] = 0, rd[7] = 0 /* DEFAULT */, rd[8] = 0x8 /* SRV */, rd[9] = 0,
+    rd[10] = 0;
+    void* dev = nullptr;
+    dx<void>(ctx, 3 /* GetDevice */, &dev);
+    void* resolved = nullptr;
+    HRESULT hr = dx<HRESULT>(dev, dd::CreateTexture2D, rd, nullptr, &resolved);
+    dx_release(dev);
+    if (hr < 0) return;
+    dx<void>(ctx, dc::ResolveSubresource, resolved, 0u, tex, 0u, typed);
+    dump_texture_ss(ctx, resolved, path);
+    dx_release(resolved);
+}
+
+void dump_texture_ss(void* ctx, void* tex, const std::string& path) {
     namespace dd = desktop::dev;
     uint32_t desc[11];
     dx<void>(tex, 10 /* ID3D11Texture2D::GetDesc */, desc);
@@ -258,8 +313,120 @@ std::string frame_prefix() { return "screenshots/trace/f" + std::to_string(g_fra
 
 }  // namespace
 
+// FL_TRACE_DUMP=pass: dump each render target once, when the draws move on
+// to a different one (named after the last draw that wrote it).
+void* g_pass_rt = nullptr;
+uint32_t g_pass_last = 0;
+void flush_pass(void* ctx) {
+    if (!g_pass_rt) return;
+    char name[64];
+    snprintf(name, sizeof name, "d%03u_pass_rt0.png", g_pass_last);
+    dump_texture(ctx, g_pass_rt, frame_prefix() + name);
+    dx_release(g_pass_rt);
+    g_pass_rt = nullptr;
+}
+
+// FL_TRACE_PIXEL=x,y: after every draw/dispatch/command list of a traced
+// frame, read RT0's pixel (x, y) back (MSAA targets resolved first) and log
+// it whenever it changed: which draws touch a broken part of the screen.
+void probe_pixel(void* ctx) {
+    static int px = -1, py = -1;
+    static bool parsed = false;
+    if (!parsed) {
+        parsed = true;
+        if (const char* e = getenv("FL_TRACE_PIXEL")) sscanf(e, "%d,%d", &px, &py);
+    }
+    if (px < 0) return;
+    namespace dd = desktop::dev;
+    void* rtv = nullptr;
+    void* dsv = nullptr;
+    dx<void>(ctx, dc::OMGetRenderTargets, 1u, &rtv, &dsv);
+    if (dsv) dx_release(dsv);
+    if (!rtv) return;
+    void* tex = nullptr;
+    dx<void>(rtv, kViewGetResource, &tex);
+    dx_release(rtv);
+    if (!tex) return;
+    uint32_t desc[11];
+    dx<void>(tex, 10 /* ID3D11Texture2D::GetDesc */, desc);
+    static void* last_tex = nullptr;
+    static uint32_t last_val = 0;
+    void* dev = nullptr;
+    dx<void>(ctx, 3 /* GetDevice */, &dev);
+    void* src = tex;
+    void* resolved = nullptr;
+    uint32_t fmt = desc[4], typed = fmt == 23 ? 24 : fmt == 27 ? 28 : fmt == 9 ? 10 : fmt;
+    if (desc[5] > 1 && desc[0] > uint32_t(px) && desc[1] > uint32_t(py)) {
+        uint32_t rd[11];
+        std::memcpy(rd, desc, sizeof rd);
+        rd[2] = rd[3] = 1, rd[4] = typed, rd[5] = 1, rd[6] = 0, rd[7] = 0, rd[8] = 0x8, rd[9] = 0, rd[10] = 0;
+        if (dx<HRESULT>(dev, dd::CreateTexture2D, rd, nullptr, &resolved) >= 0) {
+            dx<void>(ctx, dc::ResolveSubresource, resolved, 0u, tex, 0u, typed);
+            src = resolved;
+        }
+    }
+    uint32_t val = 0;
+    bool ok = false;
+    if (desc[0] > uint32_t(px) && desc[1] > uint32_t(py) && (desc[5] <= 1 || resolved)) {
+        uint32_t sd[11] = {1, 1, 1, 1, typed, 1, 0, 3 /* STAGING */, 0, 0x20000 /* READ */, 0};
+        void* staging = nullptr;
+        if (dx<HRESULT>(dev, dd::CreateTexture2D, sd, nullptr, &staging) >= 0) {
+            uint32_t box[6] = {uint32_t(px), uint32_t(py), 0, uint32_t(px) + 1, uint32_t(py) + 1, 1};
+            dx<void>(ctx, dc::CopySubresourceRegion, staging, 0u, 0u, 0u, 0u, src, 0u, box);
+            struct {
+                uint8_t* data;
+                UINT row, depth;
+            } m{};
+            if (dx<HRESULT>(ctx, dc::Map, staging, 0u, 1u, 0u, &m) >= 0) {
+                std::memcpy(&val, m.data, 4);
+                dx<void>(ctx, dc::Unmap, staging, 0u);
+                ok = true;
+            }
+            dx_release(staging);
+        }
+    }
+    if (resolved) dx_release(resolved);
+    dx_release(dev);
+    if (ok && (tex != last_tex || val != last_val)) {
+        if (fmt == 26)
+            log_write("trace", "    pixel %d,%d of %p = (%g %g %g)", px, py, tex, f11(val & 0x7ff, 6),
+                      f11((val >> 11) & 0x7ff, 6), f11(val >> 22, 5));
+        else
+            log_write("trace", "    pixel %d,%d of %p (fmt %u) = 0x%08x", px, py, tex, fmt, val);
+    }
+    if (ok) last_tex = tex, last_val = val;
+    dx_release(tex);
+}
+
 void after_draw(void* ctx) {
+    if (g_active) probe_pixel(ctx);
     if (!g_active || !g_dump) return;
+    static const bool pass_mode = getenv("FL_TRACE_DUMP") && !strcmp(getenv("FL_TRACE_DUMP"), "pass");
+    if (pass_mode) {
+        if (g_last_compute) {
+            g_last_compute = false;
+            for (auto& u : g_last_uav)
+                if (u) dx_release(u), u = nullptr;
+            return;
+        }
+        void* rtv = nullptr;
+        void* dsv = nullptr;
+        dx<void>(ctx, dc::OMGetRenderTargets, 1u, &rtv, &dsv);
+        if (dsv) dx_release(dsv);
+        if (!rtv) return;
+        void* res = nullptr;
+        dx<void>(rtv, kViewGetResource, &res);
+        dx_release(rtv);
+        if (!res) return;
+        if (res != g_pass_rt) {
+            flush_pass(ctx);
+            g_pass_rt = res;  // keeps the reference
+        } else {
+            dx_release(res);
+        }
+        g_pass_last = g_draws;
+        return;
+    }
     if (g_last_compute) {
         g_last_compute = false;
         for (int i = 0; i < 8; i++)
@@ -276,6 +443,20 @@ void after_draw(void* ctx) {
             }
         return;
     }
+    // FL_TRACE_DUMP_DRAWS=a-b[/step]: only dump RT0 after those draws (and
+    // the ExecuteCommandLists that follow them: suffix _e1, _e2, ...).
+    static uint32_t first = 0, last = ~0u, step = 1;
+    static bool parsed = false;
+    if (!parsed) {
+        parsed = true;
+        if (const char* e = getenv("FL_TRACE_DUMP_DRAWS"))
+            sscanf(e, "%u-%u/%u", &first, &last, &step);
+        if (!step) step = 1;
+    }
+    if (g_draws < first || g_draws > last || (g_draws - first) % step) return;
+    static uint32_t sub_draw = ~0u, sub = 0;
+    sub = sub_draw == g_draws ? sub + 1 : 0;
+    sub_draw = g_draws;
     void* rtv = nullptr;
     void* dsv = nullptr;
     dx<void>(ctx, dc::OMGetRenderTargets, 1u, &rtv, &dsv);
@@ -286,7 +467,8 @@ void after_draw(void* ctx) {
     dx_release(rtv);
     if (!res) return;
     char name[64];
-    snprintf(name, sizeof name, "d%03u_rt0.png", g_draws);
+    if (sub) snprintf(name, sizeof name, "d%03u_e%u_rt0.png", g_draws, sub);
+    else snprintf(name, sizeof name, "d%03u_rt0.png", g_draws);
     dump_texture(ctx, res, frame_prefix() + name);
     dx_release(res);
 }
@@ -298,6 +480,7 @@ void on_present(uint64_t frame) {
     g_active = want.count(frame) != 0;
     g_draws = 0;
     g_dumped.clear();
+    g_mip_states.clear();
     if (g_active) log_write("trace", "==== frame %llu", (unsigned long long)frame);
 }
 
@@ -410,17 +593,38 @@ void log_constant_buffers(void* ctx, bool compute, int stage_slot = -1, const ch
 }
 
 void draw(void* ctx, const char* kind, uint32_t a, uint32_t b, uint32_t c) {
-    if (!g_active) return;
+    // FL_TRACE_BUNDLES=1: also log every draw recorded on a deferred context,
+    // whatever the frame (bundles are recorded once, at load, and replayed).
+    static const bool bundles = getenv("FL_TRACE_BUNDLES") != nullptr;
+    bool active = g_active;
+    if (!active && bundles && dx<UINT>(ctx, dc::GetType) == 1 /* DEFERRED */) {
+        log_write("trace", "#bundle %s(%u, %u, %u) [ctx %p]", kind, a, b, c, ctx);
+        void* srvs[kTraceSrvs] = {};
+        dx<void>(ctx, dc::PSGetShaderResources, 0u, UINT(kTraceSrvs), srvs);
+        void *vs = nullptr, *ps = nullptr;
+        dx<void>(ctx, dc::VSGetShader, &vs, nullptr, nullptr);
+        dx<void>(ctx, dc::PSGetShader, &ps, nullptr, nullptr);
+        log_write("trace", "    VS %s PS %s", shader_str(vs).c_str(), shader_str(ps).c_str());
+        if (vs) dx_release(vs);
+        if (ps) dx_release(ps);
+        for (int i = 0; i < kTraceSrvs; i++)
+            if (srvs[i]) {
+                log_write("trace", "    t%d %s", i, view_str(srvs[i]).c_str());
+                dx_release(srvs[i]);
+            }
+        return;
+    }
+    if (!active) return;
     g_draws++;
     bool compute = !strncmp(kind, "Dispatch", 8);
     log_write("trace", "#%u %s(%u, %u, %u) [ctx %p]", g_draws, kind, a, b, c, ctx);
-    void* srvs[16] = {};
+    void* srvs[kTraceSrvs] = {};
     if (compute) {
         void* cs = nullptr;
         dx<void>(ctx, dc::CSGetShader, &cs, nullptr, nullptr);
         log_write("trace", "    CS %s", shader_str(cs).c_str());
         if (cs) dx_release(cs);
-        dx<void>(ctx, dc::CSGetShaderResources, 0u, 16u, srvs);
+        dx<void>(ctx, dc::CSGetShaderResources, 0u, UINT(kTraceSrvs), srvs);
         log_constant_buffers(ctx, true);
         void* uavs[8] = {};
         dx<void>(ctx, dc::CSGetUnorderedAccessViews, 0u, 8u, uavs);
@@ -441,7 +645,7 @@ void draw(void* ctx, const char* kind, uint32_t a, uint32_t b, uint32_t c) {
         log_write("trace", "    VS %s PS %s", shader_str(vs).c_str(), shader_str(ps).c_str());
         if (vs) dx_release(vs);
         if (ps) dx_release(ps);
-        dx<void>(ctx, dc::PSGetShaderResources, 0u, 16u, srvs);
+        dx<void>(ctx, dc::PSGetShaderResources, 0u, UINT(kTraceSrvs), srvs);
         log_constant_buffers(ctx, false);
         log_constant_buffers(ctx, false, dc::VSGetConstantBuffers1, "vs-");
         {
@@ -508,7 +712,7 @@ void draw(void* ctx, const char* kind, uint32_t a, uint32_t b, uint32_t c) {
         }
         if (blend) dx_release(blend);
     }
-    for (int i = 0; i < 16; i++)
+    for (int i = 0; i < kTraceSrvs; i++)
         if (srvs[i]) {
             log_write("trace", "    t%d %s", i, view_str(srvs[i]).c_str());
             if (g_dump) {
