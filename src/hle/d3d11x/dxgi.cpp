@@ -5,7 +5,11 @@
 // The swap chain lives on our SDL window (platform/window.h). Screenshots for
 // automated checks: FL_SCREENSHOT_AT_FRAME=N[,M...] writes screenshots/frame_N.png,
 // FL_EXIT_AFTER_FRAME=M exits after frame M.
+#include <algorithm>
+#include <atomic>
+#include <cerrno>
 #include <cstdlib>
+#include <ctime>
 #include <cstring>
 #include <set>
 #include <string>
@@ -13,7 +17,9 @@
 #include <unistd.h>
 #include <vector>
 
+#include "common/config.h"
 #include "common/log.h"
+#include "loader/crash.h"
 #include "common/png.h"
 #include "hle/d3d11x/trace.h"
 #include "hle/d3d11x/d3d11x.h"
@@ -81,6 +87,21 @@ WINAPI HRESULT output_GetDisplayModeList(Iface* self, UINT format, UINT flags, U
     return dx<HRESULT>(self->as<DxgiObject>()->dxvk, desktop::output::GetDisplayModeList, format, flags, num, modes);
 }
 WINAPI HRESULT output_WaitForVBlank(Iface* self) {
+    if (getenv("FL_TRACE_TIME")) {  // rate and callers, every 10 s
+        static std::atomic<uint64_t> calls{0};
+        static std::atomic<int64_t> since{0};
+        timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        int64_t now = ts.tv_sec * 1000000000LL + ts.tv_nsec;
+        int64_t start = since.load();
+        if (!start) since.compare_exchange_strong(start, now);
+        uint64_t n = ++calls;
+        if (start && now - start >= 10000000000LL && since.compare_exchange_strong(start, now)) {
+            calls = 0;
+            log_write("time", "WaitForVBlank: %.1f/s (caller %p)", n / ((now - start) / 1e9),
+                      __builtin_return_address(0));
+        }
+    }
     return dx<HRESULT>(self->as<DxgiObject>()->dxvk, desktop::output::WaitForVBlank);
 }
 
@@ -230,6 +251,87 @@ void screenshot(SwapChain* sc) {
     dx_release(tex);
 }
 
+// Frame pacing. The game was made for the console's 59.94 Hz display and presents
+// with sync interval 2: one frame every 33.3 ms. Its simulation advances a fixed
+// step per frame, so on a 240 Hz monitor (interval 2 = 120 fps) it ran 4x too
+// fast. Present waits on a virtual 59.94 Hz vblank clock instead of the
+// monitor's: `sync` vblanks per frame, whatever the display. DXVK then gets
+// the frame at once (see sc_Present).
+// FL_FRAME_PACING=dynamic: the game's update follows real time (Config), so
+// frames go out as fast as the display takes them, or FL_FPS_CAP per second.
+// FL_FRAME_PACING=off: the old behaviour (DXVK waits `sync` monitor vblanks).
+void pace_present(UINT sync) {
+    static int64_t next = 0;
+    const Config& c = config();
+    int64_t period;
+    if (c.pacing == Config::Pacing::console) {
+        if (sync == 0) return;
+        period = sync * 16'683'333LL;  // a 59.94 Hz vblank (1001/60000 s): the game steps 1/29.97 s per frame
+    } else if (c.pacing == Config::Pacing::dynamic && c.fps_cap > 0) {
+        period = 1'000'000'000LL / c.fps_cap;
+    } else {
+        return;
+    }
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t now = ts.tv_sec * 1'000'000'000LL + ts.tv_nsec;
+    // A frame more than 4 ms late restarts the cadence from now, as a late flip
+    // does on the console. Keeping the old grid would hand the next frames over
+    // back to back (a 60 ms frame, then 14 and 22 ms ones), which looks like
+    // a second stutter.
+    if (!next || now > next + 4'000'000LL) {
+        next = now;
+    } else if (now < next) {
+        timespec until{static_cast<time_t>(next / 1'000'000'000LL), static_cast<long>(next % 1'000'000'000LL)};
+        while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &until, nullptr) == EINTR) {
+        }
+    }
+    next += period;
+}
+
+// FL_LOG=fps: every 10 s, statistics of the intervals at which frames are
+// handed to the display (after pacing): average, 1% low, worst frame, frames
+// over 50 ms, percentiles and a histogram, to measure stutter.
+void frame_stats() {
+    if (!log_enabled("fps")) return;
+    static std::vector<double> ms;
+    static int64_t last = 0, window = 0;
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t now = ts.tv_sec * 1'000'000'000LL + ts.tv_nsec;
+    if (last) ms.push_back((now - last) / 1e6);
+    last = now;
+    if (!window) window = now;
+    if (now - window < 10'000'000'000LL || ms.empty()) return;
+    std::vector<double> sorted = ms;
+    std::sort(sorted.begin(), sorted.end());
+    double total = 0;
+    int hitches = 0;
+    for (double m : ms) {
+        total += m;
+        hitches += m > 50;
+    }
+    auto pct = [&](size_t p) { return sorted[std::min(sorted.size() - 1, sorted.size() * p / 100)]; };
+    double p99 = pct(99);
+    log_write("fps", "%zu frames: %.1f fps average, 1%% low %.1f fps (%.1f ms), worst %.1f ms, %d over 50 ms; "
+              "frame time p10/p50/p90 %.1f/%.1f/%.1f ms",
+              ms.size(), ms.size() * 1000.0 / total, 1000.0 / p99, p99, sorted.back(), hitches, pct(10), pct(50),
+              pct(90));
+    {
+        // Frame-time histogram, 2 ms buckets.
+        int buckets[32] = {};
+        for (double m : ms) buckets[std::min(31, static_cast<int>(m / 2))]++;
+        std::string h;
+        for (int i = 0; i < 32; i++)
+            if (buckets[i]) h += " " + std::to_string(i * 2) + (i == 31 ? "+" : "") + ":" + std::to_string(buckets[i]);
+        log_write("fps", "  frame times (ms:count):%s", h.c_str());
+    }
+    log_write("fps", "  %s", placement_stats().c_str());
+    log_write("fps", "  %s", context_stats().c_str());
+    ms.clear();
+    window = now;
+}
+
 WINAPI HRESULT sc_Present(Iface* self, UINT sync, UINT flags) {
     auto* sc = self->as<SwapChain>();
     static std::set<uint64_t> shots = screenshot_frames();
@@ -239,7 +341,20 @@ WINAPI HRESULT sc_Present(Iface* self, UINT sync, UINT flags) {
     if (sc->frame == 1) log_write("d3d", "first Present (sync %u flags 0x%x)", sync, flags);
     if (shots.count(sc->frame)) screenshot(sc);
     trace::on_present(sc->frame + 1);
+    if (config().pacing != Config::Pacing::off) {
+        pace_present(sync);
+        // Our clock sets the cadence, so DXVK must not wait on the monitor too:
+        // a FIFO present blocks up to a refresh plus the frame queue, and the
+        // frames came out at 39/28 ms instead of 33. Interval 0 (mailbox in a
+        // compositor: no tearing) hands the frame over at once.
+        // FL_VSYNC=1: FIFO with interval 1 instead.
+        static const bool vsync = getenv("FL_VSYNC") && strcmp(getenv("FL_VSYNC"), "0") != 0;
+        sync = (sync && vsync) ? 1 : 0;
+    }
+    loader::note_present();
+    frame_stats();  // after pacing: the cadence frames are handed to the display at
     HRESULT hr = dx<HRESULT>(sc->dxvk, desktop::swapchain::Present, sync, flags & 0xff);
+    placement_frame_scan();
     if (exit_after && sc->frame >= exit_after) {
         log_write("d3d", "FL_EXIT_AFTER_FRAME=%llu reached", (unsigned long long)exit_after);
         _exit(0);

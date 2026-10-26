@@ -1,5 +1,6 @@
 // kernelx: events, mutexes, semaphores, waits, critical sections, SRW locks.
 
+#include <ctime>
 #include <sched.h>
 #include <thread>
 #include <vector>
@@ -123,9 +124,35 @@ WINAPI DWORD kx_WaitForMultipleObjectsEx(DWORD n, const HANDLE* h, BOOL all, DWO
     return wait_handles(n, h, all, ms);
 }
 
+// A yield (SwitchToThread, Sleep(0)). The game's lightweight semaphores spin
+// on SwitchToThread while they wait (rva 0x1088930: take a token with lock
+// xadd, put it back, check the timeout against the clock, yield, retry). On the
+// console such a thread owns its core; here sched_yield returns at once on an
+// idle machine, and one waiter burned a whole core at 30 fps (99% of a
+// thread). After 200 back-to-back yields a thread sleeps ~0.1 ms per yield
+// instead: it notices a release at most ~0.1 ms later and uses ~2% of a core.
+void yield_thread() {
+    thread_local uint32_t spins = 0;
+    thread_local int64_t last = 0;
+    auto now_ns = [] {
+        timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        return ts.tv_sec * 1'000'000'000LL + ts.tv_nsec;
+    };
+    int64_t now = now_ns();
+    spins = now - last < 200'000 ? spins + 1 : 0;  // the previous yield was < 0.2 ms ago: still spinning
+    if (spins > 200) {
+        timespec d{0, 100'000};
+        nanosleep(&d, nullptr);
+    } else {
+        sched_yield();
+    }
+    last = now_ns();
+}
+
 WINAPI void kx_Sleep(DWORD ms) {
     if (ms == 0)
-        sched_yield();
+        yield_thread();
     else
         std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 }
@@ -136,7 +163,7 @@ WINAPI DWORD kx_SleepEx(DWORD ms, BOOL alertable) {
 }
 
 WINAPI BOOL kx_SwitchToThread() {
-    sched_yield();
+    yield_thread();
     return TRUE_;
 }
 

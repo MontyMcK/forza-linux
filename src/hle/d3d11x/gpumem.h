@@ -41,6 +41,21 @@ bool readable(const void* addr, size_t size);
 // re-armed: other resources sharing those pages must be marked dirty by the
 // caller, since the re-arm also clears the pages for them.
 using WrittenFn = void (*)(uint64_t start, uint64_t end, void* user);
-void begin_upload(const void* addr, size_t size, WrittenFn on_written = nullptr, void* user = nullptr);
+// Returns false if the range could not be armed (it then reads as dirty).
+bool begin_upload(const void* addr, size_t size, WrittenFn on_written = nullptr, void* user = nullptr);
+
+// The game decommitted or released [addr, addr + size): our VirtualFree maps
+// fresh pages there, which drops their write tracking, and the frame scan
+// skips untracked memory. The hook (placement.cpp) marks every resource over
+// the range dirty, so its next sync uploads and re-registers it.
+using RemapFn = void (*)(uint64_t start, uint64_t end);
+void set_remap_hook(RemapFn fn);
+void notify_remap(const void* addr, size_t size);
+
+// Re-arm part `part` of `parts` equal slices of the tracked address range,
+// reporting each page range written since its last re-arm. The caller must
+// carry that over (placement.cpp's frame scan marks the resources dirty).
+// Returns the number of scan calls.
+size_t rearm_all(WrittenFn on_written, void* user, uint32_t part = 0, uint32_t parts = 1);
 
 }  // namespace fl::d3d::gpumem

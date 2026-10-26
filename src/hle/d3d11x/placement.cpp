@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <atomic>
 #include <cstring>
+#include <ctime>
+#include <string>
 #include <sys/mman.h>
 
 #include "common/log.h"
@@ -186,8 +188,76 @@ WINAPI HRESULT D3DMapEsramMemory_(UINT flags, void* addr, UINT pages, const UINT
 
 HLE_EXPORT(d3d11_x, D3DMapEsramMemory, D3DMapEsramMemory_);
 
+// FL_LOG=fps: where placement syncing spends its time (see placement_stats).
+namespace {
+std::atomic<uint64_t> g_sync_calls{0}, g_scan_ns{0}, g_uploads{0}, g_upload_bytes{0}, g_upload_ns{0};
+std::atomic<uint64_t> g_bytes_scanned{0}, g_cold_skips{0}, g_frame_scan_ns{0}, g_frame_spans{0}, g_frame_pages{0},
+    g_frame_cb_ns{0}, g_rearm_ns{0}, g_readable_ns{0}, g_untile_ns{0}, g_update_ns{0};
+
+// The frame scan. Per-bind page scans were ~15000 per frame (each resource
+// ~10 times: every command list re-syncs its placements), ~5 ms of a 33 ms
+// frame, and frames late by that much were the steady 39 ms stutter. Now each
+// frame re-arms one of kScanParts slices of all tracked memory (walking all of
+// it took ~3 ms) and marks every resource on a written page dirty and "hot".
+// Hot resources (written in the last kColdFrames frames: constants, dynamic
+// geometry) keep the exact per-bind scan; cold ones (static textures and
+// meshes) trust the frame scan, so a write to them reaches the GPU at most
+// kScanParts frames late (streamed mips, rare rewrites).
+// FL_NO_FRAME_SCAN=1: per-bind scans for everything (the old behaviour).
+constexpr uint32_t kScanParts = 4;
+constexpr uint32_t kColdFrames = 2 * kScanParts + 2;
+std::atomic<uint32_t> g_epoch{1};
+bool frame_scan_on() {
+    static const bool on = getenv("FL_NO_FRAME_SCAN") == nullptr;
+    return on;
+}
+int64_t now_ns() {
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1'000'000'000LL + ts.tv_nsec;
+}
+struct Span {  // adds the time until it goes out of scope to a counter (FL_LOG=fps only)
+    std::atomic<uint64_t>* c;
+    int64_t t0;
+    Span(std::atomic<uint64_t>* c, bool on) : c(on ? c : nullptr), t0(on ? now_ns() : 0) {}
+    void stop() {
+        if (c) c->fetch_add(now_ns() - t0, std::memory_order_relaxed);
+        c = nullptr;
+    }
+    ~Span() { stop(); }
+};
+}  // namespace
+
+std::string placement_stats() {
+    char buf[512];
+    snprintf(buf, sizeof buf, "placement: %llu syncs (%llu cold, %.1f ms scanning %.0f MB), frame scans %.1f ms "
+             "(%llu calls, %llu written pages, %.1f ms marking), %llu uploads (%.1f MB, %.1f ms)",
+             (unsigned long long)g_sync_calls.exchange(0), (unsigned long long)g_cold_skips.exchange(0),
+             g_scan_ns.exchange(0) / 1e6, g_bytes_scanned.exchange(0) / 1048576.0, g_frame_scan_ns.exchange(0) / 1e6,
+             (unsigned long long)g_frame_spans.exchange(0), (unsigned long long)g_frame_pages.exchange(0),
+             g_frame_cb_ns.exchange(0) / 1e6,
+             (unsigned long long)g_uploads.exchange(0), g_upload_bytes.exchange(0) / 1048576.0,
+             g_upload_ns.exchange(0) / 1e6);
+    size_t n = strlen(buf);
+    snprintf(buf + n, sizeof buf - n, " = re-arm %.1f + readable %.1f + untile %.1f + UpdateSubresource %.1f ms",
+             g_rearm_ns.exchange(0) / 1e6, g_readable_ns.exchange(0) / 1e6, g_untile_ns.exchange(0) / 1e6,
+             g_update_ns.exchange(0) / 1e6);
+    return buf;
+}
+
 void sync_placement(void* dxvk_ctx, Resource* r) {
     if (r->gpu_owned || !r->place_size) return;
+    static const bool stats = log_enabled("fps");
+    g_sync_calls.fetch_add(1, std::memory_order_relaxed);
+    int64_t t0 = stats ? now_ns() : 0;
+    struct UploadTimer {
+        bool on;
+        int64_t t0;
+        bool uploading = false;
+        ~UploadTimer() {
+            if (on && uploading) g_upload_ns.fetch_add(now_ns() - t0, std::memory_order_relaxed);
+        }
+    } timer{stats, 0};
     // FL_NO_PLACEMENT_UPLOAD=tex|all: bisect aid, leaves textures (or all
     // placement resources) un-uploaded.
     static const char* skip = getenv("FL_NO_PLACEMENT_UPLOAD");
@@ -201,7 +271,20 @@ void sync_placement(void* dxvk_ctx, Resource* r) {
         return h;
     };
     bool forced = r->force_dirty.exchange(false, std::memory_order_relaxed);
-    if (!forced && !gpumem::dirty(r->place, r->place_size)) {
+    uint32_t epoch = g_epoch.load(std::memory_order_relaxed);
+    uint32_t written = r->written_epoch.load(std::memory_order_relaxed);
+    bool cold = !forced && frame_scan_on() && written && epoch - written > kColdFrames &&
+                !r->untracked.load(std::memory_order_relaxed);
+    bool is_dirty = forced || (!cold && gpumem::dirty(r->place, r->place_size));
+    if (cold) g_cold_skips.fetch_add(1, std::memory_order_relaxed);
+    else if (stats) g_bytes_scanned.fetch_add(r->place_size, std::memory_order_relaxed);
+    if (is_dirty) r->written_epoch.store(epoch, std::memory_order_relaxed);
+    if (stats) {
+        int64_t t1 = now_ns();
+        g_scan_ns.fetch_add(t1 - t0, std::memory_order_relaxed);
+        timer.t0 = t1;
+    }
+    if (!is_dirty) {
         if (check && r->upload_hash && r->place_size <= (1u << 20) && gpumem::readable(r->place, r->place_size) &&
             hash(r->place, r->place_size) != r->upload_hash) {
             static std::atomic<int> reported{0};
@@ -217,13 +300,21 @@ void sync_placement(void* dxvk_ctx, Resource* r) {
         log_once("placement resource bound over released memory (not uploaded)", 0);
         return;
     }
-    gpumem::begin_upload(r->place, r->place_size, &mark_page_neighbours, r);
+    timer.uploading = true;
+    g_uploads.fetch_add(1, std::memory_order_relaxed);
+    g_upload_bytes.fetch_add(r->place_size, std::memory_order_relaxed);
+    {
+        Span t(&g_rearm_ns, stats);
+        r->untracked.store(!gpumem::begin_upload(r->place, r->place_size, &mark_page_neighbours, r),
+                           std::memory_order_relaxed);
+    }
     if (check && r->place_size <= (1u << 20) && gpumem::readable(r->place, r->place_size))
         r->upload_hash = hash(r->place, r->place_size);
     FL_LOG(upload, "placement upload [%s] dim %d at %p size 0x%zx tile %u", trace::describe_dxvk(r->dxvk), r->dim,
            static_cast<void*>(r->place), r->place_size, r->tile_mode);
     if (trace::active()) trace::event("upload placement [%s]", trace::describe_dxvk(r->dxvk));
     if (r->dim == 1) {
+        Span t(&g_update_ns, stats);
         dx<void>(dxvk_ctx, dc::UpdateSubresource, r->dxvk, 0u, nullptr, static_cast<const void*>(r->place), 0u, 0u);
         return;
     }
@@ -234,7 +325,10 @@ void sync_placement(void* dxvk_ctx, Resource* r) {
     std::vector<uint8_t> linear;
     for (uint32_t mip = 0; mip < mips; mip++) {
         const gcn::MipLayout& m = l.mips[mip];
-        if (!gpumem::readable(r->place + m.offset, m.size)) {
+        Span readable_time(&g_readable_ns, stats);
+        bool ok = gpumem::readable(r->place + m.offset, m.size);
+        readable_time.stop();
+        if (!ok) {
             // Not committed yet: a streamed texture whose big mips have not
             // arrived (the game clamps its LOD meanwhile). Uploaded once the
             // game commits and writes them (the write marks them dirty).
@@ -246,17 +340,72 @@ void sync_placement(void* dxvk_ctx, Resource* r) {
         size_t slice = row * m.height;
         if (r->dim == 4) {
             linear.resize(slice * m.depth);
+            Span ut(&g_untile_ns, stats);
             for (uint32_t z = 0; z < m.depth; z++) gcn::untile(d, l, mip, z, r->place, linear.data() + z * slice, row);
+            ut.stop();
+            Span up(&g_update_ns, stats);
             dx<void>(dxvk_ctx, dc::UpdateSubresource, r->dxvk, mip, nullptr, static_cast<const void*>(linear.data()),
                      static_cast<UINT>(row), static_cast<UINT>(slice));
             continue;
         }
         linear.resize(slice);
         for (uint32_t a = 0; a < d.array_size; a++) {
+            Span ut(&g_untile_ns, stats);
             gcn::untile(d, l, mip, a, r->place, linear.data(), row);
+            ut.stop();
+            Span up(&g_update_ns, stats);
             dx<void>(dxvk_ctx, dc::UpdateSubresource, r->dxvk, mip + a * mips, nullptr,
                      static_cast<const void*>(linear.data()), static_cast<UINT>(row), static_cast<UINT>(slice));
         }
+    }
+}
+
+// gpumem remap hook: memory under these pages was decommitted/released and
+// mapped afresh (untracked): every resource over it uploads on its next sync.
+void on_memory_remapped(uint64_t start, uint64_t end) {
+    uint32_t e = g_epoch.load(std::memory_order_relaxed);
+    std::lock_guard lock(g_placed_mutex);
+    if (g_page_users.empty()) return;
+    for (uint64_t p = start >> 12; p < end >> 12; p++) {
+        auto it = g_page_users.find(p);
+        if (it == g_page_users.end()) continue;
+        for (Resource* o : it->second) {
+            o->force_dirty.store(true, std::memory_order_relaxed);
+            o->written_epoch.store(e, std::memory_order_relaxed);
+        }
+    }
+}
+
+void placement_frame_scan() {
+    static const bool hooked = (gpumem::set_remap_hook(&on_memory_remapped), true);
+    (void)hooked;
+    if (!frame_scan_on()) return;
+    static const bool stats = log_enabled("fps");
+    int64_t t0 = stats ? now_ns() : 0;
+    uint32_t epoch = g_epoch.fetch_add(1, std::memory_order_relaxed) + 1;
+    size_t spans = gpumem::rearm_all(
+        [](uint64_t start, uint64_t end, void* user) {
+            uint32_t e = *static_cast<uint32_t*>(user);
+            int64_t c0 = now_ns();
+            g_frame_pages.fetch_add((end - start) >> 12, std::memory_order_relaxed);
+            struct Done {
+                int64_t c0;
+                ~Done() { g_frame_cb_ns.fetch_add(now_ns() - c0, std::memory_order_relaxed); }
+            } done{c0};
+            std::lock_guard lock(g_placed_mutex);
+            for (uint64_t p = start >> 12; p < (end + 0xfff) >> 12; p++) {
+                auto it = g_page_users.find(p);
+                if (it == g_page_users.end()) continue;
+                for (Resource* o : it->second) {
+                    o->force_dirty.store(true, std::memory_order_relaxed);
+                    o->written_epoch.store(e, std::memory_order_relaxed);
+                }
+            }
+        },
+        &epoch, epoch % kScanParts, kScanParts);
+    if (stats) {
+        g_frame_scan_ns.fetch_add(now_ns() - t0, std::memory_order_relaxed);
+        g_frame_spans.fetch_add(spans, std::memory_order_relaxed);
     }
 }
 

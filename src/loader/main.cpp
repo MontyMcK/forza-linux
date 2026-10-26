@@ -29,8 +29,9 @@ constexpr size_t kMainStackSize = 64ull << 20;  // the game's main thread does h
 
 void usage(const char* argv0) {
     fprintf(stderr,
-            "usage: %s --game-dir <path to the dump's Mount/ folder> [--exe <name>]\n"
-            "env: FL_LOG=all|chan,...  FL_LOG_FILE=path  FL_TRACE_IMPORTS=1|all\n",
+            "usage: %s --game-dir <path to the dump's Mount/ folder> [--exe <name>] [-- <game options>...]\n"
+            "env: FL_LOG=all|chan,...  FL_LOG_FILE=path  FL_TRACE_IMPORTS=1|all\n"
+            "     FL_FRAME_PACING=console|dynamic|off  FL_FPS_CAP=<fps> (dynamic)\n",
             argv0);
     exit(2);
 }
@@ -43,8 +44,32 @@ void parse_args(int argc, char** argv) {
             c.game_dir = argv[++i];
         else if (!strcmp(argv[i], "--exe") && i + 1 < argc)
             exe = argv[++i];
-        else
+        else if (!strcmp(argv[i], "--")) {
+            for (i++; i < argc; i++) c.game_args.push_back(argv[i]);
+        } else
             usage(argv[0]);
+    }
+    // Frame pacing (FINDINGS §6c). The engine steps its update by a fixed
+    // 1/29.97 s per frame while synchroniseUpdateToRenderThread is on (the
+    // console default); with it off the step is the measured frame time
+    // (clamped to 0.2 s), and unlockframerate drops the engine's own limiter.
+    if (const char* p = getenv("FL_FRAME_PACING")) {
+        if (!strcmp(p, "dynamic"))
+            c.pacing = Config::Pacing::dynamic;
+        else if (!strcmp(p, "off"))
+            c.pacing = Config::Pacing::off;
+        else if (strcmp(p, "console") != 0)
+            fatal("FL_FRAME_PACING=%s: use console, dynamic or off", p);
+    }
+    if (const char* f = getenv("FL_FPS_CAP")) c.fps_cap = atoi(f);
+    if (c.pacing == Config::Pacing::dynamic) {
+        // UNIMPLEMENTED: the retail game never parses these from argv (its
+        // option parser rva 0x299950 doesn't run), so the update step stays
+        // fixed and the game runs too fast. FINDINGS §6c has where to look next.
+        FL_ERROR("UNIMPLEMENTED FL_FRAME_PACING=dynamic: the engine options don't reach the game yet, so the "
+                 "update step is still fixed and the game runs too fast above 30 fps");
+        c.game_args.push_back("synchroniseUpdateToRenderThread=0");
+        c.game_args.push_back("unlockframerate");
     }
     if (c.game_dir.empty()) usage(argv[0]);
     c.game_dir = std::filesystem::absolute(c.game_dir).lexically_normal().string();

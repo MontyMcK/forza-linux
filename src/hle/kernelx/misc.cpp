@@ -1,6 +1,10 @@
 // kernelx: time, strings/locale, debug output, modules, pointers, errors.
 
+#include <algorithm>
 #include <cstring>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
 #include <ctime>
 #include <string>
 
@@ -36,7 +40,38 @@ WINAPI BOOL kx_QueryPerformanceFrequency(LARGE_INTEGER* f) {
     return TRUE_;
 }
 
+// FL_TRACE_TIME=1: every 10 s, log who called QueryPerformanceCounter (module +
+// rva of the return address) and how often, to find the game's frame timer.
+void trace_time_caller(void* ret) {
+    static const bool on = getenv("FL_TRACE_TIME") != nullptr;
+    if (!on) return;
+    static std::mutex m;
+    static std::unordered_map<uintptr_t, uint64_t> counts;
+    static timespec last{};
+    std::lock_guard lock(m);
+    counts[reinterpret_cast<uintptr_t>(ret)]++;
+    timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (!last.tv_sec) last = now;
+    double dt = (now.tv_sec - last.tv_sec) + (now.tv_nsec - last.tv_nsec) / 1e9;
+    if (dt < 10) return;
+    std::vector<std::pair<uint64_t, uintptr_t>> top;
+    for (auto& [pc, n] : counts) top.push_back({n, pc});
+    std::sort(top.rbegin(), top.rend());
+    for (size_t i = 0; i < top.size() && i < 25; i++) {
+        const loader::PeImage* img = loader::image_for(reinterpret_cast<void*>(top[i].second));
+        const char* mod = img ? strrchr(img->path.c_str(), '/') : nullptr;
+        log_write("time", "QPC caller %s+0x%llx: %.1f/s", mod ? mod + 1 : "?",
+                  static_cast<unsigned long long>(img ? top[i].second - reinterpret_cast<uintptr_t>(img->base)
+                                                      : top[i].second),
+                  top[i].first / dt);
+    }
+    counts.clear();
+    last = now;
+}
+
 WINAPI BOOL kx_QueryPerformanceCounter(LARGE_INTEGER* c) {
+    trace_time_caller(__builtin_return_address(0));
     timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     c->QuadPart = static_cast<LONGLONG>(ts.tv_sec) * 10000000 + ts.tv_nsec / 100;

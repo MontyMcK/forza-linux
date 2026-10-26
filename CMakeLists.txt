@@ -84,11 +84,11 @@ add_executable(dxvk_smoke tests/dxvk_smoke.cpp)
 target_include_directories(dxvk_smoke SYSTEM PRIVATE ${FL_DXVK_ROOT}/include/dxvk)
 target_link_libraries(dxvk_smoke PRIVATE ${FL_DXVK_LIBS})
 
-add_executable(gcn_layout_test tests/gcn_layout_test.cpp src/hle/xg/gcn.cpp src/common/log.cpp)
+add_executable(gcn_layout_test tests/gcn_layout_test.cpp src/hle/xg/gcn.cpp src/common/log.cpp src/common/workers.cpp)
 target_include_directories(gcn_layout_test PRIVATE src)
 target_link_libraries(gcn_layout_test PRIVATE addrlib pthread)
 
 # Dev tool (reads game files): untile a .swatchbin mip to PNG.
-add_executable(swatch_view tools/swatch_view.cpp src/hle/xg/gcn.cpp src/common/log.cpp src/common/png.cpp)
+add_executable(swatch_view tools/swatch_view.cpp src/hle/xg/gcn.cpp src/common/log.cpp src/common/png.cpp src/common/workers.cpp)
 target_include_directories(swatch_view PRIVATE src)
 target_link_libraries(swatch_view PRIVATE addrlib pthread PkgConfig::ZLIB)

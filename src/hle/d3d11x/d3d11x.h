@@ -107,6 +107,11 @@ struct Resource : DeviceChild {
     // Set when another resource's upload re-armed a page this one shares (its
     // pending writes would otherwise be lost): upload at the next sync.
     std::atomic<bool> force_dirty{false};
+    // Placement: frame-scan epoch when this resource last had writes (0: never
+    // uploaded). Resources idle for a few frames skip per-bind scans.
+    std::atomic<uint32_t> written_epoch{0};
+    // Placement: the last re-arm failed, so writes aren't tracked. Never cold.
+    std::atomic<bool> untracked{false};
     uint32_t tile_mode = 0;    // index into the GCN tile mode table (textures)
     uint32_t pitch = 0;        // in elements, 0 = default
     bool gpu_owned = false;    // render target / depth / UAV: the GPU writes it, never upload
@@ -128,6 +133,10 @@ void* make_adapter(void* dxvk_adapter);      // dxgi.cpp: wraps an IDXGIAdapter
 // Copy a placement resource's game memory to DXVK if it changed. Called when
 // the resource is bound. Cheap when nothing changed.
 void sync_placement(void* dxvk_ctx, Resource* r);
+std::string placement_stats();  // FL_LOG=fps: counters since the last call
+// Once per frame (Present): one scan of all tracked memory (see placement.cpp).
+void placement_frame_scan();
+std::string context_stats();    // FL_LOG=fps: command lists and binds since the last call
 // A placement resource is going away: forget it as the owner of its address.
 void placement_forget(Resource* r);
 // The live placement resource whose memory contains `addr` (a new reference), or nullptr.

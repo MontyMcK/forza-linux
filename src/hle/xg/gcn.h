@@ -35,6 +35,7 @@ struct MipLayout {
     uint32_t base_align = 0;
     int tile_index = 0;       // may be degraded for small mips (2D -> 1D)
     int macro_index = -1;
+    uint32_t block_w = 0, block_h = 0;  // addrlib's tiling block (macro tile for 2D, micro for 1D), elements
 };
 
 struct Layout {
@@ -50,7 +51,11 @@ bool compute_layout(const SurfaceDesc& d, Layout* out);
 uint64_t element_offset(const SurfaceDesc& d, const Layout& l, uint32_t mip, uint32_t x, uint32_t y, uint32_t slice,
                         uint32_t sample = 0);
 
-// Tiled (game memory) -> linear rows for one mip/slice.
+// The per-element addrlib version of untile, for tests.
+void untile_reference(const SurfaceDesc& d, const Layout& l, uint32_t mip, uint32_t slice, const uint8_t* tiled,
+                      uint8_t* linear, size_t linear_pitch);
+// Tiled (game memory) -> linear rows for one mip/slice. Big levels are split
+// into row bands across the worker pool (common/workers.h).
 void untile(const SurfaceDesc& d, const Layout& l, uint32_t mip, uint32_t slice, const uint8_t* tiled, uint8_t* linear,
             size_t linear_pitch);
 

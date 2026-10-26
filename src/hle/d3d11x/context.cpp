@@ -59,6 +59,9 @@ __attribute__((always_inline)) inline void* ctxdx(void* self) {
 
 ULONG add_ref(C* c) { return c->deferred ? ++c->refs : c->device->add_ref(); }
 
+// FL_LOG=fps counters (context_stats).
+std::atomic<uint64_t> g_ecls{0}, g_ecl_syncs{0}, g_bind_syncs{0};
+
 // Game object -> DXVK object for a bind: also brings placement memory up to date.
 void* bind_unwrap(void* ctx, const void* obj) {
     DeviceChild* c = child_of(obj);
@@ -76,6 +79,7 @@ void* bind_unwrap(void* ctx, const void* obj) {
         }
         return c->dxvk;
     }
+    if (Resource* r = c->backing(); r && r->place && !r->gpu_owned) g_bind_syncs.fetch_add(1, std::memory_order_relaxed);
     sync_for_gpu(ctx, c);
     return c->dxvk;
 }
@@ -415,6 +419,9 @@ WINAPI HRESULT ctx_Map(void* self, void* res, UINT sub, UINT type, UINT flags, v
     if (trace::active()) trace::event("Map [%s] sub %u type %u", trace::describe_dxvk(unwrap(res)), sub, type);
     HRESULT hr = dx<HRESULT>(ctxdx(self), dc::Map, unwrap(res), sub, type, flags, mapped);
     if (log_enabled("cbwrite") && hr >= 0) note_small_cb_map(child_of(res), type, static_cast<MappedSubresource*>(mapped)->data);
+    // DXGI_ERROR_WAS_STILL_DRAWING for a D3D11_MAP_FLAG_DO_NOT_WAIT map is the
+    // normal answer: the game polls its read-back buffers that way.
+    if (hr == static_cast<HRESULT>(0x887A000A) && (flags & 0x100000u)) return hr;
     if (hr < 0) {
         auto* r = static_cast<Resource*>(child_of(res));
         const uint32_t* d = reinterpret_cast<const uint32_t*>(r->xdesc);
@@ -743,8 +750,10 @@ WINAPI HRESULT ctx_FinishCommandList(void* self, BOOL restore, void** out) {
 
 WINAPI void ctx_ExecuteCommandList(void* self, void* list, BOOL restore) {
     auto* c = C::from(self);
+    g_ecls.fetch_add(1, std::memory_order_relaxed);
     FL_LOG(fence, "%s ctx %p ExecuteCommandList %p", c->deferred ? "deferred" : "immediate", self, list);
     if (auto* cl = static_cast<CommandList*>(child_of(list))) {
+        g_ecl_syncs.fetch_add(cl->placements.size(), std::memory_order_relaxed);
         for (Resource* r : cl->placements) {
             sync_for_gpu(c->dxvk, r);
             if (c->deferred && std::find(c->recorded_placements.begin(), c->recorded_placements.end(), r) ==
@@ -979,6 +988,14 @@ void** context_table() {
 }
 
 }  // namespace
+
+std::string context_stats() {
+    char buf[160];
+    snprintf(buf, sizeof buf, "%llu command lists executed (%llu placement syncs), %llu placement binds",
+             (unsigned long long)g_ecls.exchange(0), (unsigned long long)g_ecl_syncs.exchange(0),
+             (unsigned long long)g_bind_syncs.exchange(0));
+    return buf;
+}
 
 void add_context_methods(void** t) {
     auto set = [&](int slot, auto fn) { t[slot] = reinterpret_cast<void*>(fn); };

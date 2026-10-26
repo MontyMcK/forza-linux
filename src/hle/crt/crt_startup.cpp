@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <vector>
 
+#include "common/config.h"
 #include "common/log.h"
 #include "common/winabi.h"
 #include "hle/registry.h"
@@ -40,15 +41,28 @@ WINAPI int c_initterm_e(PIFV* begin, PIFV* end) {
 // ---------------------------------------------------------------- args / globals
 
 char g_cmdline[] = "Forza_Durango_Release_Final.exe";
-char* g_acmdln = g_cmdline;
-char* g_argv_storage[] = {g_cmdline, nullptr};
+char* g_acmdln = g_cmdline;  // replaced by the full command line in c_getmainargs
 char* g_envp_storage[] = {nullptr};
 int g_fmode = 0;
 int g_commode = 0;
 
+// argv: the exe name, then Config::game_args (the game parses engine options
+// such as "unlockframerate" from them; FINDINGS §6c).
 WINAPI int c_getmainargs(int* argc, char*** argv, char*** envp, int wildcard, void* startinfo) {
-    *argc = 1;
-    *argv = g_argv_storage;
+    static std::vector<char*> args = [] {
+        std::vector<char*> v{g_cmdline};
+        std::string line = g_cmdline;
+        for (const std::string& a : config().game_args) {
+            v.push_back(strdup(a.c_str()));
+            line += a.find(' ') == std::string::npos ? " " + a : " \"" + a + "\"";
+            FL_LOG(loader, "game option: %s", a.c_str());
+        }
+        v.push_back(nullptr);
+        g_acmdln = strdup(line.c_str());
+        return v;
+    }();
+    *argc = static_cast<int>(args.size()) - 1;
+    *argv = args.data();
     *envp = g_envp_storage;
     return 0;
 }

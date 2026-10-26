@@ -4,7 +4,9 @@
 #include <SDL3/SDL_vulkan.h>
 #include <atomic>
 #include <cstdio>
+#include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <unistd.h>
 
@@ -21,6 +23,27 @@ void parse_size(int* w, int* h) {
     *w = 1280;
     *h = 720;
     if (const char* s = getenv("FL_WINDOW")) std::sscanf(s, "%dx%d", w, h);
+}
+
+// The game shows a new frame every 1/29.97 s. On a display whose refresh is
+// not a multiple of ~30 Hz (144, 165, 260 Hz) frames stay up for alternating
+// numbers of refreshes, which looks like judder even at a steady 30 fps.
+void log_refresh() {
+    SDL_DisplayID d = SDL_GetDisplayForWindow(g_window);
+    const SDL_DisplayMode* m = d ? SDL_GetCurrentDisplayMode(d) : nullptr;
+    if (!m || m->refresh_rate <= 0) return;
+    float hz = m->refresh_rate;
+    float per_frame = hz / 29.97f;
+    bool even = std::fabs(per_frame - std::round(per_frame)) < 0.05f;
+    log_write("platform", "display %s: %.2f Hz (%.2f refreshes per game frame)%s", SDL_GetDisplayName(d), hz,
+              per_frame, even ? "" : ": frames will judder; 60/120/240 Hz or variable refresh (fullscreen) is smooth");
+}
+
+void set_fullscreen(bool on) {
+    if (!SDL_SetWindowFullscreen(g_window, on))
+        FL_ERROR("fullscreen %s failed: %s", on ? "on" : "off", SDL_GetError());
+    else
+        log_write("platform", "fullscreen %s", on ? "on" : "off");
 }
 
 }  // namespace
@@ -44,9 +67,15 @@ SDL_Window* window() {
     if (g_window) return g_window;
     int w, h;
     parse_size(&w, &h);
-    g_window = SDL_CreateWindow("Forza Horizon 2 (forza-linux)", w, h, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+    // FL_FULLSCREEN=1: borderless fullscreen on the window's display (F11 or
+    // Alt+Enter toggles it while playing).
+    const char* fs = getenv("FL_FULLSCREEN");
+    bool fullscreen = fs && strcmp(fs, "0") != 0;
+    SDL_WindowFlags flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | (fullscreen ? SDL_WINDOW_FULLSCREEN : 0);
+    g_window = SDL_CreateWindow("Forza Horizon 2 (forza-linux)", w, h, flags);
     if (!g_window) fatal("SDL_CreateWindow failed: %s", SDL_GetError());
-    log_write("platform", "window %dx%d created", w, h);
+    log_write("platform", "window %dx%d created%s", w, h, fullscreen ? " (fullscreen)" : "");
+    log_refresh();
     return g_window;
 }
 
@@ -61,6 +90,10 @@ void pump_events() {
             log_write("platform", "window closed: exiting");
             _exit(0);
         }
+        if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
+            (e.key.key == SDLK_F11 || (e.key.key == SDLK_RETURN && (e.key.mod & SDL_KMOD_ALT))))
+            set_fullscreen(!(SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN));
+        if (e.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED) log_refresh();
     }
 }
 

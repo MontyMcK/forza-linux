@@ -306,16 +306,62 @@ void dump_threads() {
             if (fgets(comm, sizeof comm, f)) comm[strcspn(comm, "\n")] = 0;
             fclose(f);
         }
+        // CPU time so far (utime + stime, fields 14-15 of stat): two dumps a
+        // few seconds apart show which threads burn CPU.
+        double cpu = 0;
+        if (FILE* f = fopen(("/proc/self/task/" + std::string(e->d_name) + "/stat").c_str(), "r")) {
+            char line[1024];
+            if (fgets(line, sizeof line, f))
+                if (const char* p = strrchr(line, ')')) {
+                    unsigned long long ut = 0, st = 0;
+                    if (sscanf(p + 2, "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu", &ut, &st) == 2)
+                        cpu = double(ut + st) / sysconf(_SC_CLK_TCK);
+                }
+            fclose(f);
+        }
         g_dump_done = 0;
         g_dump_buf[0] = 0;
         syscall(SYS_tgkill, getpid(), tid, kDumpSignal);
         for (int i = 0; i < 200 && !g_dump_done.load(std::memory_order_acquire); i++) usleep(1000);
-        fl::log_write("threads", "thread %d (%s) %s", tid, comm, g_dump_done ? g_dump_buf : "did not answer\n");
+        fl::log_write("threads", "thread %d (%s) cpu %.2fs %s", tid, comm, cpu,
+                      g_dump_done ? g_dump_buf : "did not answer\n");
     }
     closedir(dir);
 }
 
+std::atomic<int64_t> g_last_present_ns{0};
+
+int64_t mono_ns() {
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1'000'000'000LL + ts.tv_nsec;
+}
+
+void start_watchdog() {
+    const char* e = getenv("FL_WATCHDOG");
+    if (e && !strcmp(e, "0")) return;
+    std::thread([] {
+        bool reported = false;
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            int64_t last = g_last_present_ns.load(std::memory_order_relaxed);
+            if (!last) continue;  // not presenting yet
+            int64_t idle = mono_ns() - last;
+            if (idle < 15'000'000'000LL) {
+                reported = false;
+                continue;
+            }
+            if (reported) continue;
+            reported = true;
+            FL_ERROR("watchdog: no Present for %lld s: the game looks frozen; thread dump follows",
+                     static_cast<long long>(idle / 1'000'000'000LL));
+            dump_threads();
+        }
+    }).detach();
+}
+
 void start_thread_dumps() {
+    start_watchdog();
     struct sigaction sa = {};
     sa.sa_sigaction = dump_handler;
     sa.sa_flags = SA_SIGINFO | SA_RESTART;
@@ -337,6 +383,8 @@ void start_thread_dumps() {
 }
 
 }  // namespace
+
+void note_present() { g_last_present_ns.store(mono_ns(), std::memory_order_relaxed); }
 
 // FL_BREAK=<rva>[,<rva>...]: one-shot breakpoints in game code. Each logs its
 // first hit (channel "break": thread and caller), then the original byte is

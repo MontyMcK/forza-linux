@@ -11,6 +11,7 @@
 #include <sys/mman.h>
 
 #include "common/log.h"
+#include "hle/d3d11x/gpumem.h"
 #include "hle/kernelx/kobject.h"
 #include "hle/registry.h"
 
@@ -89,6 +90,7 @@ WINAPI BOOL kx_VirtualFree(void* addr, SIZE_T size, DWORD type) {
         if (it == g_regions.end()) return set_last_error(ERROR_INVALID_PARAMETER), FALSE_;
         FL_LOG(memory, "VirtualFree release %p+0x%llx", addr, (unsigned long long)it->second);
         munmap(addr, it->second);
+        d3d::gpumem::notify_remap(addr, it->second);
         g_regions.erase(it);
         return TRUE_;
     }
@@ -96,6 +98,7 @@ WINAPI BOOL kx_VirtualFree(void* addr, SIZE_T size, DWORD type) {
         size = (size + 0xFFF) & ~SIZE_T(0xFFF);
         FL_LOG(memory, "VirtualFree decommit %p+0x%llx", addr, (unsigned long long)size);
         mmap(addr, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_NORESERVE, -1, 0);
+        d3d::gpumem::notify_remap(addr, size);  // the fresh pages lost their write tracking
         return TRUE_;
     }
     return set_last_error(ERROR_INVALID_PARAMETER), FALSE_;
