@@ -56,8 +56,7 @@ WINAPI HRESULT cw_Activate(Iface* self) {
     return S_OK;
 }
 
-// The game hides the cursor (put_PointerCursor(null)) at rva 0xf6c695.
-WINAPI HRESULT cw_put_PointerCursor(Iface*, void* cursor) {
+[[maybe_unused]] WINAPI HRESULT cw_put_PointerCursor(Iface*, void* cursor) {
     FL_LOG(winrt, "CoreWindow::put_PointerCursor(%p)", cursor);
     return S_OK;
 }
@@ -65,6 +64,14 @@ WINAPI HRESULT cw_put_PointerCursor(Iface*, void* cursor) {
 [[maybe_unused]] WINAPI HRESULT cw_get_IsInputEnabled(Iface* self, BOOLEAN* out) {
     *out = 1;
     return S_OK;
+}
+
+WINAPI HRESULT cw_add_activated(Iface* self, void* handler, EventToken* token) {
+    FL_LOG(winrt, "CoreWindow::add_Activated");
+    return self_of(self)->activated_event.add(handler, token);
+}
+WINAPI HRESULT cw_remove_activated(Iface* self, EventToken token) {
+    return self_of(self)->activated_event.remove(token);
 }
 
 template <int N>
@@ -92,11 +99,93 @@ Vtable& window_vt() {
         Vtable t("ICoreWindow(Xbox)", S + 40);
         t.set(S + 1, &cw_get_Dispatcher)   // rva 0xf74a5e: result gets ProcessEvents(3)
             .set(S + 5, &cw_Activate)      // rva 0xf6c858: no args
-            .set(S + 9, &cw_put_PointerCursor);  // rva 0xf6c692: CoreCursor arg
+            // rva 0xf6c692 passes (handler, &token): add_Activated, not
+            // put_PointerCursor as first guessed. Its handler (rva 0xf6dba0)
+            // posts the window-activation lifecycle message (0x1a/6).
+            .set(S + 9, &cw_add_activated)
+            .set(S + 10, &cw_remove_activated);
         set_events(t, std::make_integer_sequence<int, kCoreWindowEventPairs>{});
         return t;
     }();
     return v;
+}
+
+// ---------------------------------------------------------------- VisibilityChangedEventArgs
+// Windows raises VisibilityChanged(Visible = true) when the activated window
+// first shows. The game turns it into its "app visible" lifecycle message
+// (category 0x1a); without it a flag stays clear (system object +0x19e, game
+// rva 0x223b10) and WaitForPause opens the pause menu on its own as soon as
+// free roam starts (rva 0x963661).
+constexpr GUID IID_IVisibilityChangedEventArgs = {0xBF9918EA, 0xD801, 0x4564, {0xA4, 0x95, 0xB1, 0xE8, 0x4F, 0x8A, 0xD0, 0x85}};
+constexpr GUID IID_ICoreWindowEventArgs = {0x272B1EF3, 0xC633, 0x4DA5, {0xA2, 0x6C, 0xC6, 0xD0, 0xF5, 0x6B, 0x29, 0xDA}};
+
+struct VisibilityChangedArgs : Object {
+    explicit VisibilityChangedArgs(bool visible)
+        : Object(u"Windows.UI.Core.VisibilityChangedEventArgs"), ivis(vt_vis(), this), iargs(vt_args(), this),
+          visible(visible) {
+        expose(IID_IVisibilityChangedEventArgs, &ivis);
+        expose(IID_ICoreWindowEventArgs, &iargs);
+    }
+    Iface ivis, iargs;
+    bool visible;
+    bool handled = false;
+    static WINAPI HRESULT get_Visible(Iface* self, BOOLEAN* out) {
+        *out = self->as<VisibilityChangedArgs>()->visible;
+        return S_OK;
+    }
+    static WINAPI HRESULT get_Handled(Iface* self, BOOLEAN* out) {
+        *out = self->as<VisibilityChangedArgs>()->handled;
+        return S_OK;
+    }
+    static WINAPI HRESULT put_Handled(Iface* self, BOOLEAN v) {
+        self->as<VisibilityChangedArgs>()->handled = v;
+        return S_OK;
+    }
+    static Vtable& vt_vis() {
+        static Vtable v = Vtable("IVisibilityChangedEventArgs", S + 1).set(S + 0, &get_Visible);
+        return v;
+    }
+    static Vtable& vt_args() {
+        static Vtable v = Vtable("ICoreWindowEventArgs", S + 2).set(S + 0, &get_Handled).set(S + 1, &put_Handled);
+        return v;
+    }
+};
+
+// WindowActivatedEventArgs: S+0 get_WindowActivationState (CodeActivated 0,
+// Deactivated 1, PointerActivated 2). Without Activated(CodeActivated) the game
+// keeps its "window active" flag (system object +0x19d) clear and pauses as
+// soon as free roam starts (game rva 0x9635f0).
+constexpr GUID IID_IWindowActivatedEventArgs = {0x179D65E7, 0x4658, 0x4CB6, {0xAA, 0x13, 0x41, 0xD0, 0x94, 0xEA, 0x25, 0x5E}};
+
+struct WindowActivatedArgs : Object {
+    explicit WindowActivatedArgs(int32_t state)
+        : Object(u"Windows.UI.Core.WindowActivatedEventArgs"), iact(vt_act(), this), state(state) {
+        expose(IID_IWindowActivatedEventArgs, &iact);
+    }
+    Iface iact;
+    int32_t state;
+    static WINAPI HRESULT get_WindowActivationState(Iface* self, int32_t* out) {
+        *out = self->as<WindowActivatedArgs>()->state;
+        return S_OK;
+    }
+    static Vtable& vt_act() {
+        static Vtable v = Vtable("IWindowActivatedEventArgs", S + 1).set(S + 0, &get_WindowActivationState);
+        return v;
+    }
+};
+
+void raise_activated(CoreWindow& w, int32_t state) {
+    auto* args = new WindowActivatedArgs(state);
+    FL_LOG(winrt, "CoreWindow: raising Activated(%d)", state);
+    w.activated_event.invoke(&w.iwindow, &args->iact);
+    args->release();
+}
+
+void raise_visibility_changed(CoreWindow& w, bool visible) {
+    auto* args = new VisibilityChangedArgs(visible);
+    FL_LOG(winrt, "CoreWindow: raising VisibilityChanged(%d)", visible);
+    w.events[kVisibilityChanged].invoke(&w.iwindow, &args->ivis);
+    args->release();
 }
 
 // ---------------------------------------------------------------- ICoreDispatcher
@@ -114,6 +203,15 @@ WINAPI HRESULT cd_ProcessEvents(Iface* self, int option) {
         fl::log_write("winrt", "CoreDispatcher::ProcessEvents(%d): the game loop is pumping events", option);
     }
     platform::pump_events();
+    CoreWindow& w = CoreWindow::instance();
+    if (w.activated && !w.visibility_raised && !w.events[kVisibilityChanged].empty()) {
+        w.visibility_raised = true;
+        raise_visibility_changed(w, true);
+    }
+    if (w.activated && !w.activation_raised && !w.activated_event.empty()) {
+        w.activation_raised = true;
+        raise_activated(w, 0);  // CodeActivated
+    }
     if (option == 1) fl::fatal("ProcessEvents(ProcessUntilQuit) not supported yet");
     return S_OK;
 }

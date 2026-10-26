@@ -26,6 +26,9 @@ struct CoreWindow : Object {
     EventSource events[kCoreWindowEventPairs];
     bool visible = false;
     bool activated = false;
+    bool visibility_raised = false;  // VisibilityChanged(true) sent after activation
+    bool activation_raised = false;  // Activated(CodeActivated) sent after activation
+    EventSource activated_event;     // Xbox ICoreWindow S+9/S+10
     Rect bounds{0, 0, 1920, 1080};
 };
 

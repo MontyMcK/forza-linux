@@ -127,6 +127,7 @@ struct CoreApplicationStatics : Object {
         return S_OK;
     }
     static WINAPI HRESULT add_AvailabilityChanged(Iface* self, void* h, EventToken* t) {
+        FL_LOG(winrt, "CoreApplication::add_ResourceAvailabilityChanged (from %p)", __builtin_return_address(0));
         return self->as<CoreApplicationStatics>()->availability_changed.add(h, t);
     }
     static WINAPI HRESULT remove_AvailabilityChanged(Iface* self, EventToken t) {
