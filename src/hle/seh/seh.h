@@ -136,7 +136,7 @@ struct ActiveCatch {
     Context parent_ctx;       // context of the frame owning the catch (at the throw call site)
     uint64_t frame;           // its establisher frame
     uint32_t funclet_rva;     // catch funclet BeginAddress
-    int entry_state;          // EH state at the start of the catch funclet
+    int entry_state;          // EH state inside the catch (its try block's try_high + 1)
     ExceptionRecord rec;      // the exception being handled (for rethrow)
     bool rethrown = false;
 };

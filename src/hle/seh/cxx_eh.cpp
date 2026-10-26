@@ -175,7 +175,11 @@ void destroy_thrown(const ExceptionRecord* rec) {
     uint64_t dummy;
     RuntimeFunction* hf = lookup_function(base + ht->handler, &dummy);
     ac.funclet_rva = hf ? hf->BeginAddress : ht->handler;
-    ac.entry_state = ip_to_state(fi, base, ht->handler);
+    // The catch's own EH state (catch bodies start at try_high + 1). Not the IP
+    // map at the funclet's first byte: MSVC maps funclet prologs to the try's
+    // state, so a rethrow would match this try again and recurse until the
+    // stack overflows (Microsoft.Xbox.Services.dll rva 0x29850, FINDINGS §5a).
+    ac.entry_state = tb->try_high + 1;
     ac.rec = *rec;
     push_active_catch(ac);
     unwinding_in_progress() = false;
