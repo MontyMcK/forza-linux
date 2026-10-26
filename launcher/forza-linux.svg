@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- forza-linux launcher icon: original artwork (sunset road), no game assets. -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a0c45"/>
+      <stop offset="0.45" stop-color="#c2185b"/>
+      <stop offset="0.72" stop-color="#ff5a3c"/>
+      <stop offset="1" stop-color="#ff9e1b"/>
+    </linearGradient>
+    <linearGradient id="sun" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff3b0"/>
+      <stop offset="1" stop-color="#ffb02e"/>
+    </linearGradient>
+    <linearGradient id="road" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a2a4a"/>
+      <stop offset="1" stop-color="#14101c"/>
+    </linearGradient>
+    <linearGradient id="hill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4a1747"/>
+      <stop offset="1" stop-color="#1c0b24"/>
+    </linearGradient>
+    <clipPath id="tile">
+      <rect x="8" y="8" width="240" height="240" rx="54"/>
+    </clipPath>
+  </defs>
+  <g clip-path="url(#tile)">
+    <rect x="8" y="8" width="240" height="240" fill="url(#sky)"/>
+    <circle cx="128" cy="138" r="58" fill="url(#sun)"/>
+    <g fill="#c2185b" opacity="0.55">
+      <rect x="60" y="126" width="136" height="5"/>
+      <rect x="60" y="140" width="136" height="7"/>
+      <rect x="60" y="156" width="136" height="9"/>
+    </g>
+    <path d="M8 168 C 50 150, 84 156, 112 166 C 150 180, 196 150, 248 160 L 248 248 L 8 248 Z" fill="url(#hill)"/>
+    <path d="M116 166 L 140 166 L 214 248 L 42 248 Z" fill="url(#road)"/>
+    <path d="M126 170 L 130 170 L 132 184 L 124 184 Z" fill="#ffd166"/>
+    <path d="M122 194 L 134 194 L 137 214 L 119 214 Z" fill="#ffd166"/>
+    <path d="M116 226 L 140 226 L 144 248 L 112 248 Z" fill="#ffd166"/>
+    <path d="M116 166 L 42 248" stroke="#ff9e1b" stroke-width="3" opacity="0.8"/>
+    <path d="M140 166 L 214 248" stroke="#ff9e1b" stroke-width="3" opacity="0.8"/>
+  </g>
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="3"/>
+</svg>
