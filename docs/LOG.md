@@ -288,3 +288,10 @@ Next: rebuild FFmpeg with the patch and re-measure (expect fewer clicks in gamep
 - Testing note: the game autosaves during test runs, so the start position drifts; keep a copy of the test save and restore it before each run.
 
 Next: confirm in play at the spots where the user saw it; then streaming hitches and the DXVK startup crash.
+
+## 2026-10-27 (midday): Claude: the car no longer motion-blurs
+
+- Symptom (Monty's save, donuts at the festival): the car blurred with the background; on PC ports it stays sharp. Cause and fixes: FINDINGS "Motion-blur car mask". Verified on 8 donut screenshots: car sharp, background blurred; mask dump has stencil 2 on 360k pixels (was all 0).
+- Tools: FL_LOG=shaders now prints the DXBC checksum (= DXVK_SHADER_DUMP_PATH file name), FL_LOG=create logs CreateBuffer with its caller, traced CSSetShaderResources print the game caller, FL_TRACE_DUMP decodes R8 (with a value histogram) and R16G16_FLOAT, DSS dumps show the stencil masks and ops. FL_TRACE_DUMP no longer races (per-thread state; deferred contexts are not dumped).
+
+Next: confirm in play; check other passes that read stencil views (they now see stencil in R as well as G).

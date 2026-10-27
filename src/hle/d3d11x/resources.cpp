@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 #include "common/log.h"
 #include "loader/pe_image.h"
@@ -148,6 +149,26 @@ HRESULT create_resource(DeviceX* dev, int dim, const uint32_t* xd, const void* i
 namespace {
 
 WINAPI HRESULT dev_CreateBuffer(Iface* self, const uint32_t* xd, const void* init, void** out) {
+    // FL_LOG=create: D3D11_BUFFER_DESC words (bytes, usage, bind, cpu, misc, stride) and the caller.
+    FL_LOG(create, "CreateBuffer %u B usage %u bind 0x%x cpu 0x%x misc 0x%x stride %u init %p extra 0x%x 0x%x from game rva 0x%llx",
+           xd[0], xd[1], xd[2], xd[3], xd[4], xd[5], init, xd[6], xd[7],
+           (unsigned long long)(reinterpret_cast<uintptr_t>(__builtin_return_address(0)) -
+                                reinterpret_cast<uintptr_t>(loader::main_image().base)));
+    // MiscFlags 0x20000 (Xbox): the game's raw view of a depth target's HTILE
+    // (game rva 0x10c9594: 128 KiB = 4 bytes per 8x8 tile of 1920x1080). Its
+    // compute passes read it to skip work per tile: Z mask (bits 0-3) 0 = cleared
+    // tile, 15 = read every pixel's depth; stencil state (bits 8-9) 0 = no stencil,
+    // 2-3 = read every pixel's stencil. DXVK keeps no HTILE, so all zeros made every
+    // tile "cleared, no stencil": the motion-blur mask lost the car (blurred) and
+    // the depth pass wrote the clear depth everywhere. 0xffffffff is the expanded
+    // state (what the game's own DMA clears write): every tile takes the exact
+    // per-pixel path.
+    if ((xd[4] & 0x20000) && !init) {
+        FL_STUB_ONCE("d3d: HTILE buffer (MiscFlags 0x20000) filled with 0xffffffff (expanded tiles)");
+        std::vector<uint32_t> expanded(xd[0] / 4, 0xffffffffu);
+        struct { const void* mem; UINT pitch, slice; } data{expanded.data(), xd[0], xd[0]};
+        return create_resource(dev_of(self), 1, xd, &data, out, false, nullptr);
+    }
     return create_resource(dev_of(self), 1, xd, init, out, false, nullptr);
 }
 WINAPI HRESULT dev_CreateTexture1D(Iface* self, const uint32_t* xd, const void* init, void** out) {

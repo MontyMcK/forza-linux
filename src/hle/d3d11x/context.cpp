@@ -191,7 +191,10 @@ WINAPI HRESULT ctx_SetPrivateDataInterface(void* self, const GUID& g, void* unkn
     }                                                                                                        \
     WINAPI void ctx_##S##SetShaderResources(void* self, UINT start, UINT n, void* const* views) {            \
         Unwrapped u(ctxdx(self), views, n);                                                                               \
-        if (trace::active() && #S[0] == 'C') trace::event("CSSetShaderResources(%u, %u) [ctx %p]", start, n, ctxdx(self)); \
+        if (trace::active() && #S[0] == 'C')                                                                \
+            trace::event("CSSetShaderResources(%u, %u) [ctx %p] from game rva 0x%llx", start, n, ctxdx(self),  \
+                         (unsigned long long)(reinterpret_cast<uintptr_t>(__builtin_return_address(0)) -         \
+                                              reinterpret_cast<uintptr_t>(loader::main_image().base)));         \
         dx<void>(ctxdx(self), dc::S##SetShaderResources, start, n, u.p);                                     \
     }                                                                                                        \
     WINAPI void ctx_##S##SetSamplers(void* self, UINT start, UINT n, void* const* samplers) {                \

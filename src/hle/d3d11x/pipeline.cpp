@@ -61,8 +61,12 @@ void log_shader(const char* stage, void* dxvk_obj, const void* code, SIZE_T len)
     uint64_t h = 1469598103934665603ull;
     for (SIZE_T i = 0; i < len; i++) h = (h ^ static_cast<const uint8_t*>(code)[i]) * 1099511628211ull;
     note_shader_hash(dxvk_obj, h);
-    FL_LOG(shaders, "%s %p: %zu bytes, fnv %016llx", stage, static_cast<void*>(wrapper_of(dxvk_obj)),
-           static_cast<size_t>(len), static_cast<unsigned long long>(h));
+    // DXVK names its DXVK_SHADER_DUMP_PATH files after the DXBC header checksum (bytes 4-19).
+    char sum[33] = "?";
+    if (len >= 20)
+        for (int i = 0; i < 16; i++) snprintf(sum + 2 * i, 3, "%02x", static_cast<const uint8_t*>(code)[4 + i]);
+    FL_LOG(shaders, "%s %p: %zu bytes, fnv %016llx, dxbc %s", stage, static_cast<void*>(wrapper_of(dxvk_obj)),
+           static_cast<size_t>(len), static_cast<unsigned long long>(h), sum);
 }
 
 #define FL_SHADER_CREATE(Stage, desktop_slot, vtfn, iid)                                                        \

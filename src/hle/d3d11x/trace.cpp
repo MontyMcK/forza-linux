@@ -39,8 +39,10 @@ std::set<uint64_t> frames() {
 bool g_active = false;
 thread_local void* g_match_pending = nullptr;  // FL_TRACE_RT_MATCH draw awaiting after_draw
 bool g_dump = getenv("FL_TRACE_DUMP") != nullptr;
-bool g_last_compute = false;
-void* g_last_uav[8] = {};
+// Per thread: deferred contexts record on the game's worker threads while the
+// render thread draws (a shared copy raced and crashed FL_TRACE_DUMP).
+thread_local bool g_last_compute = false;
+thread_local void* g_last_uav[8] = {};
 std::set<void*> g_dumped;  // textures already saved this frame
 uint64_t g_frame = 0;
 uint32_t g_draws = 0;
@@ -204,13 +206,27 @@ void dump_texture_ss(void* ctx, void* tex, const std::string& path) {
         std::vector<uint8_t> rgba(size_t(w) * h * 4);
         bool known = true;
         float fmin_ = 1e30f, fmax_ = -1e30f;
+        uint32_t r8_hist[256] = {};  // R8: how many texels hold each value (logged)
         for (uint32_t y = 0; y < h && known; y++) {
             const uint8_t* row = m.data + size_t(y) * m.row;
             for (uint32_t x = 0; x < w; x++) {
                 uint8_t* o = &rgba[(size_t(y) * w + x) * 4];
                 uint32_t px = 0;
                 switch (fmt) {
-                    case 61: case 62: case 63: o[0] = o[1] = o[2] = row[x]; o[3] = 255; break;  // R8
+                    case 60: case 61: case 62: case 63:  // R8: small integer masks scaled to be visible
+                        r8_hist[row[x]]++;
+                        o[0] = o[1] = o[2] = fmt == 61 ? row[x] : uint8_t(std::min(255, row[x] * 32));
+                        o[3] = 255;
+                        break;
+                    case 34: {  // R16G16_FLOAT (motion vectors): 128 + 512 * value, range of R logged
+                        const uint16_t* hp = reinterpret_cast<const uint16_t*>(row + x * 4);
+                        float r = half(hp[0]), g = half(hp[1]);
+                        o[0] = uint8_t(std::clamp(128.0f + 512.0f * r, 0.0f, 255.0f));
+                        o[1] = uint8_t(std::clamp(128.0f + 512.0f * g, 0.0f, 255.0f));
+                        o[2] = 0, o[3] = 255;
+                        fmin_ = std::fmin(fmin_, r), fmax_ = std::fmax(fmax_, r);
+                        break;
+                    }
                     case 49: o[0] = row[x * 2]; o[1] = row[x * 2 + 1]; o[2] = 0; o[3] = 255; break;  // R8G8
                     case 27: case 28: case 29: memcpy(o, row + x * 4, 4); break;
                     case 87: case 88: case 90: case 91:
@@ -259,6 +275,12 @@ void dump_texture_ss(void* ctx, void* tex, const std::string& path) {
             else log_write("trace", "    (tiny fmt %u raw 0x%08x)", fmt, reinterpret_cast<const uint32_t*>(m.data)[0]);
         }
         dx<void>(ctx, dc::Unmap, staging, 0u);
+        if (known && fmt >= 60 && fmt <= 63) {
+            std::string h;
+            for (int v = 0; v < 256; v++)
+                if (r8_hist[v]) h += " " + std::to_string(v) + ":" + std::to_string(r8_hist[v]);
+            log_write("trace", "    R8 values (value:texels):%s", h.c_str());
+        }
         if (known) {
             mkdir("screenshots", 0755);
             mkdir("screenshots/trace", 0755);
@@ -474,6 +496,13 @@ void after_draw(void* ctx) {
     }
     if (g_active) probe_pixel(ctx);
     if (!g_active || !g_dump) return;
+    // Only the immediate context has executed anything worth dumping.
+    if (dx<UINT>(ctx, dc::GetType) != 0) {
+        g_last_compute = false;
+        for (auto& u : g_last_uav)
+            if (u) dx_release(u), u = nullptr;
+        return;
+    }
     static const bool pass_mode = getenv("FL_TRACE_DUMP") && !strcmp(getenv("FL_TRACE_DUMP"), "pass");
     if (pass_mode) {
         if (g_last_compute) {
@@ -758,8 +787,11 @@ void log_state(void* ctx) {
     if (dss) {
         uint32_t d[13] = {};
         dx<void>(dss, 7 /* GetDesc */, d);
-        log_write("trace", "    DSS %p: %u %u %u %u %x %x | %u %u %u %u | %u %u %u %u ref %u", (void*)wrapper_of(dss), d[0], d[1],
-                  d[2], d[3], d[4] & 0xff, d[5] & 0xff, d[6], d[7], d[8], d[9], d[10], d[11], d[12], 0u, sref);
+        // D3D11_DEPTH_STENCIL_DESC: depth enable/write/func, stencil enable, read|write mask bytes,
+        // front {fail, depth fail, pass, func}, back {same}.
+        log_write("trace", "    DSS %p: depth %u write %u func %u | stencil %u read 0x%x write 0x%x | front %u %u %u func %u | back %u %u %u func %u | ref %u",
+                  (void*)wrapper_of(dss), d[0], d[1], d[2], d[3], d[4] & 0xff, (d[4] >> 8) & 0xff, d[5], d[6], d[7], d[8], d[9],
+                  d[10], d[11], d[12], sref);
         dx_release(dss);
     } else {
         log_write("trace", "    DSS default ref %u", sref);
