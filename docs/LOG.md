@@ -295,3 +295,16 @@ Next: confirm in play at the spots where the user saw it; then streaming hitches
 - Tools: FL_LOG=shaders now prints the DXBC checksum (= DXVK_SHADER_DUMP_PATH file name), FL_LOG=create logs CreateBuffer with its caller, traced CSSetShaderResources print the game caller, FL_TRACE_DUMP decodes R8 (with a value histogram) and R16G16_FLOAT, DSS dumps show the stencil masks and ops. FL_TRACE_DUMP no longer races (per-thread state; deferred contexts are not dumped).
 
 Next: confirm in play; check other passes that read stencil views (they now see stencil in R as well as G).
+
+## 2026-10-27 (afternoon): Claude: MSAA works (FMASK stand-in)
+
+- Monty: "the edges of models are very pixelated". Cause and fix: FINDINGS "MSAA resolve needs FMASK". A/B on Monty's save at frame 1500 (FL_FMASK_ZERO=1 vs default): jagged car and checkerboarded grass/trees vs smooth.
+- Note: a test instance started while Monty plays receives their controller input too.
+
+Next: check the cost of the full 4-sample resolve (FL_LOG=fps) and other users of the FMASK view, if any.
+
+## 2026-10-27 (afternoon): Claude: display modes
+
+- FL_DISPLAY_MODE=windowed|borderless|fullscreen (window.cpp; FL_FULLSCREEN=1 still means borderless). Borderless = a borderless window over the display at its desktop mode; fullscreen = an SDL exclusive display mode, the closest to FL_WINDOW if set, else the desktop mode (Wayland: a smaller mode is scaled; the output's own mode and refresh stay). Both start on the primary display (a new window otherwise goes to the monitor KWin picks). F11/Alt+Enter switches between windowed and the chosen mode.
+- Launcher: "Display mode" combo (Windowed / Borderless window / Fullscreen) replaces the fullscreen toggle; an old `"fullscreen": true` config becomes borderless.
+- Checked: each mode on Monty's two-monitor KDE Wayland desktop (spectacle screenshots: windowed window; borderless and both fullscreen sizes fill DP-2 and render; logs "display mode: fullscreen 1920x1080 @ 260.00 Hz" / "1280x720"). Not checked: the F11 toggle (no way to send keys from the agent).

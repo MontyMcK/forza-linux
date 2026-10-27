@@ -106,12 +106,13 @@ DXVK_HUD_ITEMS = [("fps", "FPS"), ("frametimes", "Frame times"), ("gpuload", "GP
 FRAME_PACING = [("", "Console timing: 30 fps"),
                 ("dynamic", "Dynamic (not working yet: runs too fast)"),
                 ("off", "Uncapped, game runs too fast")]
+DISPLAY_MODES = [("windowed", "Windowed"), ("borderless", "Borderless window"), ("fullscreen", "Fullscreen")]
 WINDOW_SIZES = [("", "1280 × 720 (runtime default)"), ("1600x900", "1600 × 900"), ("1920x1080", "1920 × 1080"),
                 ("2560x1440", "2560 × 1440"), ("3840x2160", "3840 × 2160"), ("custom", "Custom…")]
 
 DEFAULTS = {
     "game_dir": "", "runtime": "",
-    "window": "", "window_custom": "1920x1080", "audio": True, "gamemode": False, "frame_pacing": "", "fps_cap": 0, "fullscreen": False,
+    "window": "", "window_custom": "1920x1080", "audio": True, "gamemode": False, "frame_pacing": "", "fps_cap": 0, "display_mode": "windowed",
     "skip_intro_movie": True, "skip_logo_movie": False, "skip_extra_movies": "",
     "minimize_on_play": False, "logs_on_crash": True, "warn_other_instance": True,
     "mangohud": False, "mh_layout": "extended", "mh_metrics": list(MH_PRESETS["extended"]),
@@ -132,6 +133,10 @@ def load_config() -> dict:
         cfg.update(json.loads(CONFIG_FILE.read_text()))
     except (OSError, ValueError):
         pass
+    if cfg.pop("fullscreen", False) and cfg["display_mode"] == "windowed":
+        cfg["display_mode"] = "borderless"  # the old fullscreen switch was borderless
+    if cfg["display_mode"] not in {m for m, _ in DISPLAY_MODES}:
+        cfg["display_mode"] = "windowed"
     if not cfg["game_dir"]:
         cfg["game_dir"] = discover_game_dir()
     if not cfg["runtime"]:
@@ -401,8 +406,8 @@ def build_launch(cfg: dict, rt: RuntimeInfo) -> LaunchPlan:
         env["FL_WINDOW"] = cfg["window"]
     if not cfg["audio"]:
         env["FL_AUDIO"] = "null"
-    if cfg["fullscreen"]:
-        env["FL_FULLSCREEN"] = "1"
+    if cfg["display_mode"] != "windowed":
+        env["FL_DISPLAY_MODE"] = cfg["display_mode"]
     if cfg["frame_pacing"]:
         env["FL_FRAME_PACING"] = cfg["frame_pacing"]
     if cfg["frame_pacing"] == "dynamic" and cfg["fps_cap"] > 0:
@@ -1236,11 +1241,13 @@ class SettingsPage(QScrollArea):
         v.addWidget(game)
 
         disp = Card("Display and sound")
-        size = b.combo("window", WINDOW_SIZES)
-        disp.add_row("Window size", "The game window starts at this size; you can resize it while playing.", size)
-        disp.add_row("Fullscreen", "Borderless fullscreen. F11 or Alt+Enter switches while playing. Smoothest with "
+        disp.add_row("Display mode", "Windowed, a borderless window covering the screen, or exclusive fullscreen. "
+                     "F11 or Alt+Enter switches between windowed and the other one while playing. Smoothest with "
                      "variable refresh on, or a 60/120/240 Hz display mode (30 fps divides evenly).",
-                     b.toggle("fullscreen"))
+                     b.combo("display_mode", DISPLAY_MODES))
+        size = b.combo("window", WINDOW_SIZES)
+        disp.add_row("Window size", "The game window starts at this size; you can resize it while playing. "
+                     "In fullscreen, a size picks the screen resolution (the default keeps your desktop's).", size)
         disp.add_row("Frame rate", "The game was made for 30 fps. Dynamic lets it run faster while game time "
                      "follows the real clock; uncapped runs the game too fast.",
                      b.combo("frame_pacing", FRAME_PACING, 340))
@@ -1935,8 +1942,10 @@ class MainWindow(QMainWindow):
             bits.append("uncapped (too fast)")
         elif plan.env.get("FL_FRAME_PACING") == "dynamic":
             bits.append("dynamic fps" + (f" ≤ {cfg['fps_cap']}" if cfg["fps_cap"] else ""))
-        if "FL_FULLSCREEN" in plan.env:
-            bits.append("fullscreen")
+        if plan.env.get("FL_DISPLAY_MODE") == "borderless":
+            bits.append("borderless")
+        elif plan.env.get("FL_DISPLAY_MODE") == "fullscreen":
+            bits.append("fullscreen" + (" " + plan.env["FL_WINDOW"].replace("x", " × ") if "FL_WINDOW" in plan.env else ""))
         elif "FL_WINDOW" in plan.env:
             bits.append(plan.env["FL_WINDOW"].replace("x", " × "))
         if "FL_LOG" in plan.env:
