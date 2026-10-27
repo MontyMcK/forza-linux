@@ -220,7 +220,11 @@ bool begin_upload(const void* addr, size_t size, WrittenFn on_written, void* use
 
 namespace {
 std::atomic<RemapFn> g_remap_hook{nullptr};
+std::shared_mutex g_unmap_lock;
 }
+
+std::shared_lock<std::shared_mutex> read_guard() { return std::shared_lock(g_unmap_lock); }
+std::unique_lock<std::shared_mutex> unmap_guard() { return std::unique_lock(g_unmap_lock); }
 
 void set_remap_hook(RemapFn fn) { g_remap_hook = fn; }
 

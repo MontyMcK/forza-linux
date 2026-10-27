@@ -10,6 +10,7 @@
 
 #include "common/config.h"
 #include "common/log.h"
+#include "loader/cpu_profile.h"
 #include "loader/crash.h"
 #include "loader/game_patches.h"
 #include "loader/imports.h"
@@ -114,6 +115,7 @@ int main(int argc, char** argv) {
     if (missing) log_write("loader", "%d imports are unimplemented traps (they abort when called)", missing);
     loader::protect_image(loader::main_image());
     loader::init_process();
+    loader::start_cpu_profiler();
 
     pthread_attr_t attr;
     pthread_attr_init(&attr);

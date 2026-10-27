@@ -301,7 +301,9 @@ WINAPI BOOL kx_GetFileSizeEx(HANDLE h, LARGE_INTEGER* size) {
 WINAPI BOOL kx_FlushFileBuffers(HANDLE h) {
     auto f = get_file(h);
     if (!f) return set_last_error(ERROR_INVALID_HANDLE), FALSE_;
+    double t0 = run_time();
     fsync(f->fd);
+    FL_LOG(file, "FlushFileBuffers(fd %d): fsync %.1f ms", f->fd, (run_time() - t0) * 1000);
     return TRUE_;
 }
 

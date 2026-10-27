@@ -1,0 +1,68 @@
+--- a/src/util/util_flush.h
++++ b/src/util/util_flush.h
+@@ -106,6 +106,19 @@
+             uint64_t              chunkId,
+             uint64_t              submissionId);
+ 
++    /**
++     * \brief forza-linux: leaves chunks out of the chunk-count heuristic
++     *
++     * An Xbox draw bundle replays as many small CS chunks (one per inheritance
++     * remap), which made every bundle look like a big batch of work and
++     * caused hundreds of submissions (and render pass splits) per frame.
++     * \param [in] count Number of chunks just dispatched that should not count
++     */
++    void ignoreChunks(
++            uint64_t              count) {
++      m_lastFlushChunkId += count;
++    }
++
+   private:
+ 
+     GpuFlushType  m_maxType               = GpuFlushType::ImplicitWeakHint;
+--- a/src/d3d11/d3d11_context_imm.cpp
++++ b/src/d3d11/d3d11_context_imm.cpp
+@@ -247,14 +247,16 @@
+ 
+     // Flush any outstanding commands so that
+     // we don't mess up the execution order
++    uint64_t firstChunk = GetCurrentSequenceNumber();
+     FlushCsChunk();
+     
+     // As an optimization, flush everything if the
+     // number of pending draw calls is high enough.
+-    ConsiderFlush(GpuFlushType::ImplicitWeakHint);
++    if (!bundle)
++      ConsiderFlush(GpuFlushType::ImplicitWeakHint);
+ 
+     // Dispatch command list to the CS thread
+-    commandList->EmitToCsThread([this] (DxvkCsChunkRef&& chunk, uint64_t cost, GpuFlushType flushType) {
++    commandList->EmitToCsThread([this, bundle] (DxvkCsChunkRef&& chunk, uint64_t cost, GpuFlushType flushType) {
+       EmitCsChunk(std::move(chunk));
+ 
+       // Return the sequence number from before the flush since
+@@ -263,8 +265,11 @@
+ 
+       // Consider a flush after every chunk in case the app
+       // submits a very large command list or the GPU is idle
++      // forza-linux: not inside a draw bundle (see GpuFlushTracker::ignoreChunks)
+       AddCost(cost);
+-      ConsiderFlush(flushType);
++
++      if (!bundle)
++        ConsiderFlush(flushType);
+       return csSeqNum;
+     }, bundle ? D3D11XboxRemapProc([this] (const D3D11XboxRemap& remap) {
+       // forza-linux: bind into the immediate context's chunk, then submit it
+@@ -273,6 +278,11 @@
+       FlushCsChunk();
+     }) : D3D11XboxRemapProc());
+ 
++    // forza-linux: the chunks a bundle replay produced (one per remap) do
++    // not count towards a flush; the next ordinary command decides.
++    if (bundle)
++      m_flushTracker.ignoreChunks(GetCurrentSequenceNumber() - firstChunk);
++
+     // Restore the immediate context's state
+     if (RestoreContextState || bundle)
+       RestoreCommandListState();

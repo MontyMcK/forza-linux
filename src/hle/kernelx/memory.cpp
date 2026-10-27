@@ -89,6 +89,7 @@ WINAPI BOOL kx_VirtualFree(void* addr, SIZE_T size, DWORD type) {
         auto it = g_regions.find(base);
         if (it == g_regions.end()) return set_last_error(ERROR_INVALID_PARAMETER), FALSE_;
         FL_LOG(memory, "VirtualFree release %p+0x%llx", addr, (unsigned long long)it->second);
+        auto guard = d3d::gpumem::unmap_guard();  // not while an upload reads it
         munmap(addr, it->second);
         d3d::gpumem::notify_remap(addr, it->second);
         g_regions.erase(it);
@@ -97,6 +98,7 @@ WINAPI BOOL kx_VirtualFree(void* addr, SIZE_T size, DWORD type) {
     if (type & MEM_DECOMMIT) {
         size = (size + 0xFFF) & ~SIZE_T(0xFFF);
         FL_LOG(memory, "VirtualFree decommit %p+0x%llx", addr, (unsigned long long)size);
+        auto guard = d3d::gpumem::unmap_guard();  // not while an upload reads it
         mmap(addr, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_NORESERVE, -1, 0);
         d3d::gpumem::notify_remap(addr, size);  // the fresh pages lost their write tracking
         return TRUE_;
@@ -178,6 +180,7 @@ WINAPI void kx_XMemFreeDefault(void* p, uint64_t attributes) {
         len = it->second;
         g_xmem.erase(it);
     }
+    auto guard = d3d::gpumem::unmap_guard();  // not while an upload reads it
     munmap(p, len);
 }
 

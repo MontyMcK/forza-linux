@@ -21,6 +21,7 @@
 #include "common/log.h"
 #include "loader/crash.h"
 #include "common/png.h"
+#include "hle/d3d11x/gpu_profile.h"
 #include "hle/d3d11x/trace.h"
 #include "hle/d3d11x/d3d11x.h"
 #include "hle/d3d11x/dxvk.h"
@@ -311,14 +312,38 @@ void pace_present(UINT sync) {
 // FL_LOG=fps: every 10 s, statistics of the intervals at which frames are
 // handed to the display (after pacing): average, 1% low, worst frame, frames
 // over 50 ms, percentiles and a histogram, to measure stutter.
-void frame_stats() {
+// DXVK's backend counters (tools/dxvk-patches/0006), in DxvkStatCounter order.
+extern "C" void dxvk_xbox_stat_counters(void* device, uint64_t* counters, uint32_t count);
+
+std::string dxvk_stats(void* device, size_t frames) {
+    enum { kDraws, kMerged, kDispatches, kPasses, kBarriers, kPipeG, kPipeL, kPipeC, kTasksDone, kTasksTotal,
+           kSubmits, kPresents, kGpuSyncs, kGpuSyncTicks, kGpuIdle, kCsSyncs, kCsSyncTicks, kCsIdle, kCsChunks, kN };
+    static uint64_t last[kN] = {};
+    uint64_t now[kN] = {};
+    dxvk_xbox_stat_counters(device, now, kN);
+    auto d = [&](int i) { return double(now[i] - last[i]) / double(frames ? frames : 1); };
+    char buf[400];
+    snprintf(buf, sizeof buf,
+             "dxvk per frame: %.0f draws, %.0f dispatches, %.0f render passes, %.0f barriers, %.1f submits, "
+             "%.0f CS chunks, %.2f CS syncs (%.2f ms), %.2f GPU syncs (%.2f ms), GPU idle %.2f ms, pipelines +%llu",
+             d(kDraws), d(kDispatches), d(kPasses), d(kBarriers), d(kSubmits), d(kCsChunks), d(kCsSyncs),
+             d(kCsSyncTicks) / 1000.0, d(kGpuSyncs), d(kGpuSyncTicks) / 1000.0, d(kGpuIdle) / 1000.0,
+             (unsigned long long)(now[kPipeG] - last[kPipeG] + now[kPipeC] - last[kPipeC]));
+    memcpy(last, now, sizeof last);
+    return buf;
+}
+
+void frame_stats(void* device) {
     if (!log_enabled("fps")) return;
     static std::vector<double> ms;
     static int64_t last = 0, window = 0;
     timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     int64_t now = ts.tv_sec * 1'000'000'000LL + ts.tv_nsec;
-    if (last) ms.push_back((now - last) / 1e6);
+    if (last) {
+        ms.push_back((now - last) / 1e6);
+        if (ms.back() > 40) log_write("fps", "hitch: %.1f ms frame", ms.back());  // to line up with other events
+    }
     last = now;
     if (!window) window = now;
     if (now - window < 10'000'000'000LL || ms.empty()) return;
@@ -347,6 +372,7 @@ void frame_stats() {
     }
     log_write("fps", "  %s", placement_stats().c_str());
     log_write("fps", "  %s", context_stats().c_str());
+    log_write("fps", "  %s", dxvk_stats(device, ms.size()).c_str());
     ms.clear();
     window = now;
 }
@@ -367,6 +393,7 @@ WINAPI HRESULT sc_Present(Iface* self, UINT sync, UINT flags) {
         screenshot(sc, name);
         while (next_time < times.size() && run_time() >= times[next_time]) next_time++;
     }
+    gpuprof::on_present(sc->device->immediate->dxvk, sc->frame + 1);
     trace::on_present(sc->frame + 1);
     if (config().pacing != Config::Pacing::off) {
         pace_present(sync);
@@ -379,7 +406,7 @@ WINAPI HRESULT sc_Present(Iface* self, UINT sync, UINT flags) {
         sync = (sync && vsync) ? 1 : 0;
     }
     loader::note_present();
-    frame_stats();  // after pacing: the cadence frames are handed to the display at
+    frame_stats(sc->device->dxvk);  // after pacing: the cadence frames are handed to the display at
     HRESULT hr = dx<HRESULT>(sc->dxvk, desktop::swapchain::Present, sync, flags & 0xff);
     placement_frame_scan();
     if (exit_after && sc->frame >= exit_after) {

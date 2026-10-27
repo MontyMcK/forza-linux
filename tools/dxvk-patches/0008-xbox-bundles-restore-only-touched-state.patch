@@ -1,0 +1,429 @@
+--- a/src/d3d11/d3d11_context.h
++++ b/src/d3d11/d3d11_context.h
+@@ -40,6 +40,53 @@
+     size_t   chunk;
+   };
+ 
++  /**
++   * \brief forza-linux: the state an Xbox draw bundle binds
++   *
++   * Recorded while the bundle is recorded; after the bundle runs, the
++   * executing context re-applies only these pieces of its own state
++   * (instead of resetting and restoring everything, ~380 times a frame).
++   */
++  struct D3D11XboxTouched {
++    uint32_t shaders      = 0u;   ///< bit per D3D11ShaderType
++    uint32_t cbv[6]       = { };  ///< constant buffer slots per stage
++    uint64_t srv[6][2]    = { };  ///< shader resource slots 0-127 per stage
++    uint32_t samplers[6]  = { };  ///< sampler slots per stage
++    uint32_t vb           = 0u;   ///< vertex buffer slots
++    bool uav = false, ib = false, layout = false, topology = false, blend = false,
++         blendFactor = false, dss = false, stencilRef = false, rs = false,
++         rsSamples = false, viewports = false, framebuffer = false, xfb = false;
++
++    void merge(const D3D11XboxTouched& o) {
++      shaders |= o.shaders;
++      vb |= o.vb;
++      for (uint32_t i = 0; i < 6; i++) {
++        cbv[i] |= o.cbv[i];
++        srv[i][0] |= o.srv[i][0];
++        srv[i][1] |= o.srv[i][1];
++        samplers[i] |= o.samplers[i];
++      }
++      uav |= o.uav; ib |= o.ib; layout |= o.layout; topology |= o.topology;
++      blend |= o.blend; blendFactor |= o.blendFactor; dss |= o.dss;
++      stencilRef |= o.stencilRef; rs |= o.rs; rsSamples |= o.rsSamples;
++      viewports |= o.viewports; framebuffer |= o.framebuffer; xfb |= o.xfb;
++    }
++
++    void touchAll() {
++      shaders = ~0u; vb = ~0u;
++      for (uint32_t i = 0; i < 6; i++) {
++        cbv[i] = ~0u; srv[i][0] = ~0ull; srv[i][1] = ~0ull; samplers[i] = ~0u;
++      }
++      uav = ib = layout = topology = blend = blendFactor = dss = stencilRef = rs =
++        rsSamples = viewports = framebuffer = xfb = true;
++    }
++
++    void touchSrv(uint32_t stage, uint32_t slot) {
++      if (slot < 128u)
++        srv[stage][slot / 64u] |= uint64_t(1u) << (slot % 64u);
++    }
++  };
++
+   class D3D11DeferredContext;
+   class D3D11ImmediateContext;
+ 
+@@ -949,6 +996,13 @@
+       return m_flags & 0x20000u;
+     }
+ 
++    // forza-linux: what the bundle being recorded has bound so far
++    D3D11XboxTouched            m_xboxTouched;
++
++    // forza-linux: re-applies the touched pieces of this context's state
++    void RestoreXboxTouched(
++      const D3D11XboxTouched&                 Touched);
++
+     void BindUnorderedAccessView(
+             D3D11ShaderType                   ShaderStage,
+             UINT                              Slot,
+--- a/src/d3d11/d3d11_context.cpp
++++ b/src/d3d11/d3d11_context.cpp
+@@ -3305,6 +3305,7 @@
+ 
+   template<typename ContextType>
+   void D3D11CommonContext<ContextType>::ApplyInputLayout() {
++    if (IsXboxBundle()) m_xboxTouched.layout = true;
+     if (likely(m_state.ia.inputLayout != nullptr)) {
+       uint32_t attributeCount = m_state.ia.inputLayout->GetAttributeCount();
+       uint32_t bindingCount = m_state.ia.inputLayout->GetBindingCount();
+@@ -3329,6 +3330,7 @@
+ 
+   template<typename ContextType>
+   void D3D11CommonContext<ContextType>::ApplyPrimitiveTopology() {
++    if (IsXboxBundle()) m_xboxTouched.topology = true;
+     D3D11_PRIMITIVE_TOPOLOGY topology = m_state.ia.primitiveTopology;
+     DxvkInputAssemblyState iaState(VK_PRIMITIVE_TOPOLOGY_MAX_ENUM, false);
+ 
+@@ -3369,6 +3371,7 @@
+ 
+   template<typename ContextType>
+   void D3D11CommonContext<ContextType>::ApplyBlendState() {
++    if (IsXboxBundle()) m_xboxTouched.blend = true;
+     if (m_state.om.cbState != nullptr) {
+       EmitCs([
+         cBlendState = m_state.om.cbState->GetBlendState(),
+@@ -3399,6 +3402,7 @@
+ 
+   template<typename ContextType>
+   void D3D11CommonContext<ContextType>::ApplyBlendFactor() {
++    if (IsXboxBundle()) m_xboxTouched.blendFactor = true;
+     EmitCs([
+       cBlendConstants = DxvkBlendConstants {
+         m_state.om.blendFactor[0], m_state.om.blendFactor[1],
+@@ -3411,6 +3415,7 @@
+ 
+   template<typename ContextType>
+   void D3D11CommonContext<ContextType>::ApplyDepthStencilState() {
++    if (IsXboxBundle()) m_xboxTouched.dss = true;
+     if (m_state.om.dsState != nullptr) {
+       EmitCs([
+         cState = m_state.om.dsState->GetState()
+@@ -3427,6 +3432,7 @@
+   
+   template<typename ContextType>
+   void D3D11CommonContext<ContextType>::ApplyStencilRef() {
++    if (IsXboxBundle()) m_xboxTouched.stencilRef = true;
+     EmitCs([
+       cStencilRef = m_state.om.stencilRef
+     ] (DxvkContext* ctx) {
+@@ -3437,6 +3443,7 @@
+   
+   template<typename ContextType>
+   void D3D11CommonContext<ContextType>::ApplyRasterizerState() {
++    if (IsXboxBundle()) m_xboxTouched.rs = true;
+     if (m_state.rs.state != nullptr) {
+       EmitCs([
+         cState      = m_state.rs.state->GetState(),
+@@ -3456,6 +3463,7 @@
+ 
+   template<typename ContextType>
+   void D3D11CommonContext<ContextType>::ApplyRasterizerSampleCount() {
++    if (IsXboxBundle()) m_xboxTouched.rsSamples = true;
+     D3D11SpecData specData = {};
+     specData.sampleCount = m_state.om.sampleCount;
+ 
+@@ -3479,6 +3487,7 @@
+ 
+   template<typename ContextType>
+   void D3D11CommonContext<ContextType>::ApplyViewportState() {
++    if (IsXboxBundle()) m_xboxTouched.viewports = true;
+     uint32_t viewportCount = m_state.rs.numViewports;
+ 
+     if (likely(viewportCount)) {
+@@ -3584,6 +3593,7 @@
+   template<D3D11ShaderType ShaderStage>
+   void D3D11CommonContext<ContextType>::BindShader(
+     const D3D11CommonShader*    pShaderModule) {
++    if (IsXboxBundle()) m_xboxTouched.shaders |= 1u << uint32_t(ShaderStage);
+     uint64_t oldUavMask = m_state.lazy.bindingsUsed[ShaderStage].uavMask;
+ 
+     if (pShaderModule) {
+@@ -3683,6 +3693,7 @@
+ 
+   template<typename ContextType>
+   void D3D11CommonContext<ContextType>::BindFramebuffer() {
++    if (IsXboxBundle()) m_xboxTouched.framebuffer = true;
+     DxvkDepthBiasRepresentation depthBiasRepresentation =
+       { VK_DEPTH_BIAS_REPRESENTATION_LEAST_REPRESENTABLE_VALUE_FORMAT_EXT,
+         m_device->features().extDepthBiasControl.depthBiasExact };
+@@ -3746,6 +3757,7 @@
+           D3D11Buffer*                      pBuffer,
+           UINT                              Offset,
+           UINT                              Stride) {
++    if (IsXboxBundle()) m_xboxTouched.vb |= 1u << Slot;
+     if (pBuffer) {
+       EmitCs([
+         cSlotId       = Slot,
+@@ -3772,6 +3784,7 @@
+           D3D11Buffer*                      pBuffer,
+           UINT                              Offset,
+           UINT                              Stride) {
++    if (IsXboxBundle()) m_xboxTouched.vb |= 1u << Slot;
+     if (pBuffer) {
+       VkDeviceSize offset = Offset;
+       VkDeviceSize length = pBuffer->GetRemainingSize(Offset);
+@@ -3794,6 +3807,7 @@
+           D3D11Buffer*                      pBuffer,
+           UINT                              Offset,
+           DXGI_FORMAT                       Format) {
++    if (IsXboxBundle()) m_xboxTouched.ib = true;
+     VkIndexType indexType = Format == DXGI_FORMAT_R16_UINT
+       ? VK_INDEX_TYPE_UINT16
+       : VK_INDEX_TYPE_UINT32;
+@@ -3822,6 +3836,7 @@
+           D3D11Buffer*                      pBuffer,
+           UINT                              Offset,
+           DXGI_FORMAT                       Format) {
++    if (IsXboxBundle()) m_xboxTouched.ib = true;
+     if (pBuffer) {
+       VkIndexType indexType = Format == DXGI_FORMAT_R16_UINT
+         ? VK_INDEX_TYPE_UINT16
+@@ -3848,6 +3863,7 @@
+           UINT                              Slot,
+           D3D11Buffer*                      pBuffer,
+           UINT                              Offset) {
++    if (IsXboxBundle()) m_xboxTouched.xfb = true;
+     if (pBuffer) {
+       EmitCs([
+         cSlotId       = Slot,
+@@ -3886,6 +3902,7 @@
+           D3D11Buffer*                      pBuffer,
+           UINT                              Offset,
+           UINT                              Length) {
++    if (IsXboxBundle()) m_xboxTouched.cbv[uint32_t(ShaderStage)] |= 1u << Slot;
+     uint32_t slotId = D3D11ShaderResourceMapping::computeCbvBinding(ShaderStage, Slot);
+ 
+     if (pBuffer) {
+@@ -3914,6 +3931,7 @@
+           UINT                              Slot,
+           UINT                              Offset,
+           UINT                              Length) {
++    if (IsXboxBundle()) m_xboxTouched.cbv[uint32_t(ShaderStage)] |= 1u << Slot;
+     uint32_t slotId = D3D11ShaderResourceMapping::computeCbvBinding(ShaderStage, Slot);
+ 
+     EmitCs([
+@@ -3932,6 +3950,7 @@
+           D3D11ShaderType                   ShaderStage,
+           UINT                              Slot,
+           D3D11SamplerState*                pSampler) {
++    if (IsXboxBundle()) m_xboxTouched.samplers[uint32_t(ShaderStage)] |= 1u << Slot;
+     uint32_t slotId = D3D11ShaderResourceMapping::computeSamplerBinding(ShaderStage, Slot);
+ 
+     if (pSampler) {
+@@ -3999,6 +4018,7 @@
+           D3D11ShaderType                   ShaderStage,
+           UINT                              Slot,
+           D3D11ShaderResourceView*          pResource) {
++    if (IsXboxBundle()) m_xboxTouched.touchSrv(uint32_t(ShaderStage), Slot);
+     uint32_t slotId = D3D11ShaderResourceMapping::computeSrvBinding(ShaderStage, Slot);
+ 
+     if (pResource) {
+@@ -4037,6 +4057,7 @@
+           D3D11ShaderType                   ShaderStage,
+           UINT                              Slot,
+           D3D11UnorderedAccessView*         pUav) {
++    if (IsXboxBundle()) m_xboxTouched.uav = true;
+     uint32_t uavSlotId = D3D11ShaderResourceMapping::computeUavBinding(ShaderStage, Slot);
+     uint32_t ctrSlotId = D3D11ShaderResourceMapping::computeUavCounterBinding(ShaderStage, Slot);
+ 
+@@ -4877,6 +4898,10 @@
+ 
+   template<typename ContextType>
+   void D3D11CommonContext<ContextType>::ResetCommandListState() {
++    // forza-linux: inside a draw bundle this unbinds everything
++    if (IsXboxBundle())
++      m_xboxTouched.touchAll();
++
+     EmitCs([
+       cUsedBindings  = GetMaxUsedBindings()
+     ] (DxvkContext* ctx) {
+@@ -5170,6 +5195,91 @@
+     SetDrawBuffers(nullptr, nullptr);
+   }
+ 
++
++  template<typename ContextType>
++  void D3D11CommonContext<ContextType>::RestoreXboxTouched(
++    const D3D11XboxTouched&                 Touched) {
++    if (Touched.framebuffer)
++      BindFramebuffer();
++
++    if (Touched.shaders & (1u << uint32_t(D3D11ShaderType::eVertex)))
++      BindShader<D3D11ShaderType::eVertex>(GetCommonShader(m_state.vs.ptr()));
++    if (Touched.shaders & (1u << uint32_t(D3D11ShaderType::eHull)))
++      BindShader<D3D11ShaderType::eHull>(GetCommonShader(m_state.hs.ptr()));
++    if (Touched.shaders & (1u << uint32_t(D3D11ShaderType::eDomain)))
++      BindShader<D3D11ShaderType::eDomain>(GetCommonShader(m_state.ds.ptr()));
++    if (Touched.shaders & (1u << uint32_t(D3D11ShaderType::eGeometry)))
++      BindShader<D3D11ShaderType::eGeometry>(GetCommonShader(m_state.gs.ptr()));
++    if (Touched.shaders & (1u << uint32_t(D3D11ShaderType::ePixel)))
++      BindShader<D3D11ShaderType::ePixel>(GetCommonShader(m_state.ps.ptr()));
++    if (Touched.shaders & (1u << uint32_t(D3D11ShaderType::eCompute)))
++      BindShader<D3D11ShaderType::eCompute>(GetCommonShader(m_state.cs.ptr()));
++
++    if (Touched.layout)       ApplyInputLayout();
++    if (Touched.topology)     ApplyPrimitiveTopology();
++    if (Touched.blend)        ApplyBlendState();
++    if (Touched.blendFactor)  ApplyBlendFactor();
++    if (Touched.dss)          ApplyDepthStencilState();
++    if (Touched.stencilRef)   ApplyStencilRef();
++    if (Touched.rs)           ApplyRasterizerState();
++    if (Touched.rsSamples)    ApplyRasterizerSampleCount();
++    if (Touched.viewports)    ApplyViewportState();
++
++    if (Touched.ib) {
++      BindIndexBuffer(
++        m_state.ia.indexBuffer.buffer.ptr(),
++        m_state.ia.indexBuffer.offset,
++        m_state.ia.indexBuffer.format);
++    }
++
++    for (uint32_t i = 0; i < m_state.ia.vertexBuffers.size() && i < 32u; i++) {
++      if (Touched.vb & (1u << i)) {
++        BindVertexBuffer(i,
++          m_state.ia.vertexBuffers[i].buffer.ptr(),
++          m_state.ia.vertexBuffers[i].offset,
++          m_state.ia.vertexBuffers[i].stride);
++      }
++    }
++
++    if (Touched.xfb) {
++      for (uint32_t i = 0; i < m_state.so.targets.size(); i++)
++        BindXfbBuffer(i, m_state.so.targets[i].buffer.ptr(), ~0u);
++    }
++
++    ResetDirtyTracking();
++
++    for (uint32_t s = 0; s < D3D11ShaderTypeCount; s++) {
++      auto stage = D3D11ShaderType(s);
++
++      const auto& cbv = m_state.cbv[stage];
++      for (uint32_t i = 0; i < cbv.buffers.size() && i < 32u; i++) {
++        if (Touched.cbv[s] & (1u << i)) {
++          BindConstantBuffer(stage, i, cbv.buffers[i].buffer.ptr(),
++            cbv.buffers[i].constantOffset, cbv.buffers[i].constantBound);
++        }
++      }
++
++      const auto& srv = m_state.srv[stage];
++      for (uint32_t i = 0; i < srv.views.size() && i < 128u; i++) {
++        if (Touched.srv[s][i / 64u] & (uint64_t(1u) << (i % 64u)))
++          BindShaderResource(stage, i, srv.views[i].ptr());
++      }
++
++      const auto& smp = m_state.samplers[stage];
++      for (uint32_t i = 0; i < smp.samplers.size() && i < 32u; i++) {
++        if (Touched.samplers[s] & (1u << i))
++          BindSampler(stage, i, smp.samplers[i].ptr());
++      }
++    }
++
++    if (Touched.uav) {
++      RestoreUnorderedAccessViews(D3D11ShaderType::ePixel);
++      RestoreUnorderedAccessViews(D3D11ShaderType::eCompute);
++    }
++
++    SetDrawBuffers(nullptr, nullptr);
++  }
++
+ 
+   template<typename ContextType>
+   void D3D11CommonContext<ContextType>::RestoreConstantBuffers(
+--- a/src/d3d11/d3d11_context_def.cpp
++++ b/src/d3d11/d3d11_context_def.cpp
+@@ -184,7 +184,15 @@
+     // Clean up command list state so that the any state changed
+     // by this command list does not affect the calling context.
+     // This also ensures that the command list is never empty.
+-    ResetCommandListState();
++    // forza-linux: a draw bundle instead records what it bound, and the
++    // executing context restores just that (D3D11XboxTouched).
++    if (IsXboxBundle()) {
++      EmitCs([] (DxvkContext*) { });
++      m_commandList->SetXboxTouched(m_xboxTouched);
++      m_xboxTouched = D3D11XboxTouched();
++    } else {
++      ResetCommandListState();
++    }
+ 
+     // Make sure all commands are visible to the command list
+     FlushCsChunk();
+@@ -408,6 +416,14 @@
+ 
+     m_commandList->AddXboxRemap({ Kind, DstStage, DstSlot, SrcStage, SrcSlot,
+       m_commandList->GetChunkCount() });
++
++    // The remap binds that slot when the bundle runs: restore it afterwards.
++    switch (Kind) {
++      case 0: if (DstStage < 6u && DstSlot < 32u) m_xboxTouched.cbv[DstStage] |= 1u << DstSlot; break;
++      case 1: if (DstStage < 6u) m_xboxTouched.touchSrv(DstStage, DstSlot); break;
++      case 2: if (DstStage < 6u && DstSlot < 32u) m_xboxTouched.samplers[DstStage] |= 1u << DstSlot; break;
++      case 3: if (DstSlot < 32u) m_xboxTouched.vb |= 1u << DstSlot; break;
++    }
+   }
+ 
+ 
+--- a/src/d3d11/d3d11_context_imm.cpp
++++ b/src/d3d11/d3d11_context_imm.cpp
+@@ -284,7 +284,11 @@
+       m_flushTracker.ignoreChunks(GetCurrentSequenceNumber() - firstChunk);
+ 
+     // Restore the immediate context's state
+-    if (RestoreContextState || bundle)
++    // forza-linux: a draw bundle changed only what it bound (it no longer
++    // ends with a full reset), so only that is re-applied.
++    if (bundle)
++      RestoreXboxTouched(commandList->GetXboxTouched());
++    else if (RestoreContextState)
+       RestoreCommandListState();
+     else
+       ResetContextState();
+--- a/src/d3d11/d3d11_cmdlist.h
++++ b/src/d3d11/d3d11_cmdlist.h
+@@ -55,6 +55,15 @@
+       return m_chunks.size();
+     }
+ 
++    // forza-linux: the state a draw bundle binds (D3D11XboxTouched)
++    void SetXboxTouched(const D3D11XboxTouched& Touched) {
++      m_xboxTouched.merge(Touched);
++    }
++
++    const D3D11XboxTouched& GetXboxTouched() const {
++      return m_xboxTouched;
++    }
++
+     void TrackResourceUsage(
+             ID3D11Resource*     pResource,
+             D3D11_RESOURCE_DIMENSION ResourceType,
+@@ -82,6 +91,7 @@
+     std::vector<Com<D3D11Query, false>> m_queries;
+     std::vector<TrackedResource>        m_resources;
+     std::vector<D3D11XboxRemap>         m_remaps;
++    D3D11XboxTouched                    m_xboxTouched;
+ 
+     D3DDestructionNotifier              m_destructionNotifier;
+ 
+--- a/src/d3d11/d3d11_cmdlist.cpp
++++ b/src/d3d11/d3d11_cmdlist.cpp
+@@ -84,6 +84,8 @@
+       m_remaps.push_back(remap);
+     }
+ 
++    m_xboxTouched.merge(pCommandList->m_xboxTouched);
++
+     // Return ID of the last chunk added. The command list
+     // added can never be empty, so do not handle zero.
+     return m_chunks.size() - 1;

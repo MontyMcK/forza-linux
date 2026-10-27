@@ -140,7 +140,7 @@ std::string context_stats();    // FL_LOG=fps: command lists and binds since the
 // A placement resource is going away: forget it as the owner of its address.
 void placement_forget(Resource* r);
 // The live placement resource whose memory contains `addr` (a new reference), or nullptr.
-Resource* placement_containing(uint64_t addr);
+Resource* placement_containing(uint64_t addr);  // GPU-owned placement over addr (referenced), or null
 inline void sync_for_gpu(void* dxvk_ctx, DeviceChild* c) {
     if (Resource* r = c ? c->backing() : nullptr)
         if (r->place) sync_placement(dxvk_ctx, r);

@@ -19,6 +19,7 @@
 #include "hle/registry.h"
 #include "hle/xg/xg.h"
 
+#include <map>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -42,6 +43,11 @@ constexpr UINT kGpuWriteBinds = 0x20 | 0x40 | 0x80;  // RENDER_TARGET | DEPTH_ST
 // resource (another reference) instead of a new copy.
 std::mutex g_placed_mutex;
 std::unordered_map<uintptr_t, Resource*> g_placed;
+// GPU-owned placements (render and depth targets) by address, for
+// placement_containing: the DMA engine's fills look them up by address, and a
+// scan of every placement per fill took a fifth of the CPU time.
+std::map<uintptr_t, Resource*> g_gpu_owned;
+uint64_t g_gpu_owned_max = 0;  // largest place_total among them (bounds the search)
 
 // CPU-written placement resources by 4 KiB page: write tracking is per page,
 // and small resources (constant buffers) share pages. Guarded by g_placed_mutex.
@@ -145,6 +151,10 @@ HRESULT create_placement(Iface* self, int dim, const uint32_t* xd, UINT tile_mod
             }
         }
         g_placed[reinterpret_cast<uintptr_t>(addr)] = r;  // the newest resource at an address owns it
+        if (r->gpu_owned) {
+            g_gpu_owned[reinterpret_cast<uintptr_t>(addr)] = r;
+            g_gpu_owned_max = std::max(g_gpu_owned_max, std::max(r->place_total, uint64_t(r->place_size)));
+        }
     }
     return hr;
 }
@@ -351,6 +361,8 @@ void sync_placement(void* dxvk_ctx, Resource* r) {
         }
         return;
     }
+    // From here on game memory is read: it must not be unmapped meanwhile.
+    auto guard = gpumem::read_guard();
     if (!gpumem::mapped(r->place, r->place_size)) {
         // The game released this memory and still binds the resource (Azimuth
         // reports the same). Keep the last contents.
@@ -472,11 +484,17 @@ void placement_frame_scan() {
 
 Resource* placement_containing(uint64_t addr) {
     std::lock_guard lock(g_placed_mutex);
-    for (auto& [a, r] : g_placed)
-        if (addr >= a && addr - a < std::max(r->place_total, uint64_t(r->place_size))) {
+    // Walk down from the last target starting at or below addr, as far as the
+    // largest target could reach.
+    for (auto it = g_gpu_owned.upper_bound(addr); it != g_gpu_owned.begin();) {
+        --it;
+        if (addr - it->first >= g_gpu_owned_max) break;
+        Resource* r = it->second;
+        if (addr - it->first < std::max(r->place_total, uint64_t(r->place_size))) {
             r->add_ref();
             return r;
         }
+    }
     return nullptr;
 }
 
@@ -485,6 +503,8 @@ void placement_forget(Resource* r) {
     if (!r->gpu_owned) page_index_remove(r);
     auto it = g_placed.find(reinterpret_cast<uintptr_t>(r->place));
     if (it != g_placed.end() && it->second == r) g_placed.erase(it);
+    auto g = g_gpu_owned.find(reinterpret_cast<uintptr_t>(r->place));
+    if (g != g_gpu_owned.end() && g->second == r) g_gpu_owned.erase(g);
 }
 
 void add_placement_methods(Vtable& v) {

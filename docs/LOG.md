@@ -319,3 +319,10 @@ Next: check the cost of the full 4-sample resolve (FL_LOG=fps) and other users o
 ## 2026-10-27 (afternoon): Claude: repo renamed to Open Horizon 2
 
 - GitHub repo MontyMcK/forza-linux renamed to **MontyMcK/open-horizon-2** at Monty's request (a proprietary project has a similar name); GitHub redirects the old URL. README title updated; the binary, the launcher and the FL_* variables keep the forza-linux name for now.
+
+## 2026-10-27 (afternoon/evening): Claude: performance pass, ~90 -> ~175 fps in the open world
+
+- Monty: "I have proper horsepower and I'm not getting crazy frames". Measured in dynamic mode (his request: test at max fps) on his save while driving. Causes and fixes in FINDINGS "Performance: bundles and DXVK's flush/restore logic": DXVK patches 0007 (bundle chunks don't trigger flushes) and 0008 (restore only what a bundle bound), the DMA fill lookup, plus the upload/VirtualFree race fix.
+- New tools: FL_GPU_PROFILE(_AT_TIME) (src/hle/d3d11x/gpu_profile.cpp), FL_CPU_PROFILE (src/loader/cpu_profile.cpp), DXVK counters in FL_LOG=fps (patch 0006).
+- Results: 5 min soak, dynamic (refresh cap 260 Hz): 153-193 fps average, 1% low ~80-90 fps, no crash; screenshots correct. Its one 85-117 ms frame every 30 s was the soak's own FL_SCREENSHOT_AT_TIME capture (read-back + PNG on the render thread): a 3 min run without screenshots had no frame over 20 ms (FL_LOG=fps now logs every frame over 40 ms as "hitch"; FL_LOG=file times FlushFileBuffers). Autosaves (every 60 s) cause no hitch.
+- Next: the render thread is still the limit (~5 ms/frame): ~10k CS chunks per frame from bundle remaps (AllocCsChunk, CS thread at ~50%), the page-tracking ioctls (~17% of the render thread: per-bind scans of hot resources and the per-frame scan); frame times are bimodal (p10 3.8 ms / p90 ~9 ms), probably the 4-frame static-cascade cycle.

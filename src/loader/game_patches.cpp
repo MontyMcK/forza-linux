@@ -1,5 +1,6 @@
 #include "loader/game_patches.h"
 
+#include <cstdlib>
 #include <cstring>
 
 #include "common/config.h"

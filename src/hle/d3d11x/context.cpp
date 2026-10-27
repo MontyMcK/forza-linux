@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "common/log.h"
+#include "hle/d3d11x/gpu_profile.h"
 #include "hle/d3d11x/trace.h"
 #include "hle/d3d11x/d3d11x.h"
 #include "hle/d3d11x/dxvk.h"
@@ -137,6 +138,11 @@ void apply_inline_state(C* c) {
         dx<void>(c->dxvk, dc::IASetPrimitiveTopology, topo);
         c->applied_topology_bits = bits;
     }
+}
+
+// FL_GPU_PROFILE: a GPU timestamp before each operation on the immediate context.
+inline void prof(void* self, const char* kind) {
+    if (gpuprof::active() && !C::from(self)->deferred) gpuprof::mark(ctxdx(self), kind);
 }
 
 // ---- IUnknown / DeviceChild ----
@@ -287,6 +293,7 @@ WINAPI void ctx_IAGetPrimitiveTopology(void* self, int* topo) {
 WINAPI void ctx_DrawIndexed(void* self, uint64_t start_count, INT base) {
     UINT start = static_cast<UINT>(start_count), count = static_cast<UINT>(start_count >> 32);
     apply_inline_state(C::from(self));
+    prof(self, "DrawIndexed");
     trace::draw(ctxdx(self), "DrawIndexed", count, start, base);
     dx<void>(ctxdx(self), dc::DrawIndexed, count, start, base);
     trace::after_draw(ctxdx(self));
@@ -321,6 +328,7 @@ void debug_null_srvs(void* dxctx) {
 WINAPI void ctx_Draw(void* self, UINT count, UINT start) {
     apply_inline_state(C::from(self));
     debug_null_srvs(ctxdx(self));
+    prof(self, "Draw");
     trace::draw(ctxdx(self), "Draw", count, start);
     dx<void>(ctxdx(self), dc::Draw, count, start);
     trace::after_draw(ctxdx(self));
@@ -330,6 +338,7 @@ WINAPI void ctx_DrawIndexedInstanced(void* self, uint64_t start_count, uint64_t 
     INT base = static_cast<INT>(static_cast<uint32_t>(base_inst));
     UINT start_inst = static_cast<UINT>(base_inst >> 32);
     apply_inline_state(C::from(self));
+    prof(self, "DrawIndexedInstanced");
     trace::draw(ctxdx(self), "DrawIndexedInstanced", count, instances, start);
     dx<void>(ctxdx(self), dc::DrawIndexedInstanced, count, instances, start, base, start_inst);
     trace::after_draw(ctxdx(self));
@@ -337,12 +346,14 @@ WINAPI void ctx_DrawIndexedInstanced(void* self, uint64_t start_count, uint64_t 
 WINAPI void ctx_DrawInstanced(void* self, UINT count, uint64_t start_inst64, UINT instances) {
     UINT start = static_cast<UINT>(start_inst64), start_inst = static_cast<UINT>(start_inst64 >> 32);
     apply_inline_state(C::from(self));
+    prof(self, "DrawInstanced");
     trace::draw(ctxdx(self), "DrawInstanced", count, instances, start);
     dx<void>(ctxdx(self), dc::DrawInstanced, count, instances, start, start_inst);
     trace::after_draw(ctxdx(self));
 }
 WINAPI void ctx_DrawAuto(void* self) {
     apply_inline_state(C::from(self));
+    prof(self, "DrawAuto");
     trace::draw(ctxdx(self), "DrawAuto", 0);
     dx<void>(ctxdx(self), dc::DrawAuto);
     trace::after_draw(ctxdx(self));
@@ -350,6 +361,7 @@ WINAPI void ctx_DrawAuto(void* self) {
 WINAPI void ctx_DrawIndexedInstancedIndirect(void* self, void* buf, UINT offset) {
     apply_inline_state(C::from(self));
     void* b = bind_unwrap(ctxdx(self), buf);
+    prof(self, "DrawIndexedInstancedIndirect");
     trace::draw(ctxdx(self), "DrawIndexedInstancedIndirect", offset);
     trace::event("    args [%s] +%u", trace::describe_dxvk(b), offset);
     dx<void>(ctxdx(self), dc::DrawIndexedInstancedIndirect, b, offset);
@@ -358,12 +370,14 @@ WINAPI void ctx_DrawIndexedInstancedIndirect(void* self, void* buf, UINT offset)
 WINAPI void ctx_DrawInstancedIndirect(void* self, void* buf, UINT offset) {
     apply_inline_state(C::from(self));
     void* b = bind_unwrap(ctxdx(self), buf);
+    prof(self, "DrawInstancedIndirect");
     trace::draw(ctxdx(self), "DrawInstancedIndirect", offset);
     trace::event("    args [%s] +%u", trace::describe_dxvk(b), offset);
     dx<void>(ctxdx(self), dc::DrawInstancedIndirect, b, offset);
     trace::after_draw(ctxdx(self));
 }
 WINAPI void ctx_Dispatch(void* self, UINT x, UINT y, UINT z) {
+    prof(self, "Dispatch");
     trace::draw(ctxdx(self), "Dispatch", x, y, z);
     trace::log_dispatch(ctxdx(self), x, y, z);
     dx<void>(ctxdx(self), dc::Dispatch, x, y, z);
@@ -371,6 +385,7 @@ WINAPI void ctx_Dispatch(void* self, UINT x, UINT y, UINT z) {
 }
 WINAPI void ctx_DispatchIndirect(void* self, void* buf, UINT offset) {
     void* b = bind_unwrap(ctxdx(self), buf);
+    prof(self, "DispatchIndirect");
     trace::draw(ctxdx(self), "DispatchIndirect", offset);
     trace::event("    args [%s] +%u", trace::describe_dxvk(b), offset);
     dx<void>(ctxdx(self), dc::DispatchIndirect, b, offset);
@@ -445,6 +460,7 @@ WINAPI void ctx_Unmap(void* self, void* res, UINT sub) {
 // must be uploaded before the GPU reads it, exactly as for a bind.
 WINAPI void ctx_CopySubresourceRegion(void* self, void* dst, UINT dst_sub, UINT x, UINT y, UINT z, void* src,
                                       UINT src_sub, const void* box) {
+    prof(self, "CopySubresource");
     void* s = bind_unwrap(ctxdx(self), src);
     if (trace::active())
         trace::event("CopySubresourceRegion dst[%s] sub %u at %u,%u <- src sub %u", trace::describe_dxvk(unwrap(dst)),
@@ -454,11 +470,13 @@ WINAPI void ctx_CopySubresourceRegion(void* self, void* dst, UINT dst_sub, UINT 
 }
 WINAPI void ctx_CopySubresourceRegion1(void* self, void* dst, UINT dst_sub, UINT x, UINT y, UINT z, void* src,
                                        UINT src_sub, const void* box, UINT flags) {
+    prof(self, "CopySubresource");
     void* s = bind_unwrap(ctxdx(self), src);
     trace::note_write("CopySubresourceRegion1", unwrap(dst), s);
     dx<void>(ctxdx(self), dc::CopySubresourceRegion1, unwrap(dst), dst_sub, x, y, z, s, src_sub, box, flags);
 }
 WINAPI void ctx_CopyResource(void* self, void* dst, void* src) {
+    prof(self, "CopyResource");
     void* s = bind_unwrap(ctxdx(self), src);
     if (trace::active())
         trace::event("CopyResource dst[%s] <- src[%s]", std::string(trace::describe_dxvk(unwrap(dst))).c_str(),
@@ -506,17 +524,21 @@ WINAPI void ctx_CopyStructureCount(void* self, void* dst, UINT offset, void* uav
     dx<void>(ctxdx(self), dc::CopyStructureCount, unwrap(dst), offset, unwrap(uav));
 }
 WINAPI void ctx_ClearRenderTargetView(void* self, void* rtv, const float* color) {
+    prof(self, "ClearRTV");
     if (trace::active())
         trace::event("ClearRenderTargetView %p (%.2f %.2f %.2f %.2f)", rtv, color[0], color[1], color[2], color[3]);
     dx<void>(ctxdx(self), dc::ClearRenderTargetView, unwrap(rtv), color);
 }
 WINAPI void ctx_ClearUnorderedAccessViewUint(void* self, void* uav, const UINT* values) {
+    prof(self, "ClearUAV");
     dx<void>(ctxdx(self), dc::ClearUnorderedAccessViewUint, unwrap(uav), values);
 }
 WINAPI void ctx_ClearUnorderedAccessViewFloat(void* self, void* uav, const float* values) {
+    prof(self, "ClearUAV");
     dx<void>(ctxdx(self), dc::ClearUnorderedAccessViewFloat, unwrap(uav), values);
 }
 WINAPI void ctx_ClearDepthStencilView(void* self, void* dsv, UINT flags, float depth, uint8_t stencil) {
+    prof(self, "ClearDSV");
     if (trace::active()) {
         void* res = nullptr;
         if (dsv) dx<void>(unwrap(dsv), 7 /* ID3D11View::GetResource */, &res);
@@ -549,6 +571,7 @@ WINAPI void ctx_ResolveSubresource(void* self, void* dst, UINT dst_sub, void* sr
 WINAPI void ctx_DiscardResource(void* self, void* res) { dx<void>(ctxdx(self), dc::DiscardResource, unwrap(res)); }
 WINAPI void ctx_DiscardView(void* self, void* view) { dx<void>(ctxdx(self), dc::DiscardView, unwrap(view)); }
 WINAPI void ctx_ClearView(void* self, void* view, const float* color, const void* rects, UINT n) {
+    prof(self, "ClearView");
     dx<void>(ctxdx(self), dc::ClearView, unwrap(view), color, rects, n);
 }
 
@@ -757,6 +780,7 @@ WINAPI HRESULT ctx_FinishCommandList(void* self, BOOL restore, void** out) {
 
 WINAPI void ctx_ExecuteCommandList(void* self, void* list, BOOL restore) {
     auto* c = C::from(self);
+    prof(self, "ExecuteCommandList");
     g_ecls.fetch_add(1, std::memory_order_relaxed);
     FL_LOG(fence, "%s ctx %p ExecuteCommandList %p", c->deferred ? "deferred" : "immediate", self, list);
     if (auto* cl = static_cast<CommandList*>(child_of(list))) {

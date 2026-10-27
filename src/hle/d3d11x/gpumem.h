@@ -13,6 +13,9 @@
 // that broke kernel writes and raced between threads (2026-10-25).
 #pragma once
 
+#include <mutex>
+#include <shared_mutex>
+
 #include <cstddef>
 #include <cstdint>
 
@@ -49,6 +52,13 @@ bool begin_upload(const void* addr, size_t size, WrittenFn on_written = nullptr,
 // skips untracked memory. The hook (placement.cpp) marks every resource over
 // the range dirty, so its next sync uploads and re-registers it.
 using RemapFn = void (*)(uint64_t start, uint64_t end);
+// Placement uploads read game memory that other game threads may free at the
+// same time (a streamed texture decommitted mid-untile faulted on a PROT_NONE
+// page). Uploads hold read_guard() while they touch it; VirtualFree and
+// XMemFree take unmap_guard() before unmapping.
+std::shared_lock<std::shared_mutex> read_guard();
+std::unique_lock<std::shared_mutex> unmap_guard();
+
 void set_remap_hook(RemapFn fn);
 void notify_remap(const void* addr, size_t size);
 

@@ -1,0 +1,34 @@
+--- a/src/d3d11/d3d11.sym
++++ b/src/d3d11/d3d11.sym
+@@ -2,6 +2,7 @@
+   global:
+     D3D11CoreCreateDevice;
+     dxvk_xbox_remap_inheritance;
++    dxvk_xbox_stat_counters;
+     D3D11CreateDevice;
+     D3D11CreateDeviceAndSwapChain;
+     D3D11On12CreateDevice;
+--- a/src/d3d11/d3d11_device.cpp
++++ b/src/d3d11/d3d11_device.cpp
+@@ -4162,3 +4162,21 @@
+   }
+ 
+ }
++
++
++// forza-linux: the backend's statistics counters (DxvkStatCounter order, up to
++// \c count of them) of the device behind \c pDevice, for the runtime's
++// frame statistics.
++extern "C" DLLEXPORT void dxvk_xbox_stat_counters(
++        ID3D11Device*         pDevice,
++        uint64_t*             pCounters,
++        uint32_t              count) {
++  if (!pDevice || !pCounters)
++    return;
++
++  auto device = static_cast<dxvk::D3D11Device*>(pDevice)->GetDXVKDevice();
++  dxvk::DxvkStatCounters stats = device->getStatCounters();
++
++  for (uint32_t i = 0; i < count && i < uint32_t(dxvk::DxvkStatCounter::NumCounters); i++)
++    pCounters[i] = stats.getCtr(dxvk::DxvkStatCounter(i));
++}
