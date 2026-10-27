@@ -280,15 +280,28 @@ HRESULT create_view(Iface* self, int desktop_slot, const void* res, const void* 
     if (hr < 0 && desktop_slot == dd::CreateShaderResourceView && desc && rr && rr->dim == 3 && out) {
         // The console reinterprets a texture's memory in any view format (e.g.
         // R8_UINT over an R11G11B10_FLOAT target at startup); D3D11 forbids
-        // views across format families. STUB: such a view reads a zeroed
-        // stand-in texture of the view's format, so the game's setup that
-        // creates it completes instead of half-failing.
+        // views across format families. STUB: such a view reads a stand-in
+        // texture of the view's format, so the game's setup that creates it
+        // completes instead of half-failing.
+        // An R8_UINT view of a multisampled colour target is its FMASK (which
+        // colour fragment each sample uses, 2 bits per sample at 4x): the MSAA
+        // resolve (fs.6209bcf0) copies sample 0 where it is 0 and blends the
+        // samples otherwise. DXVK keeps every sample, so the stand-in holds
+        // the identity map (sample n -> fragment n: 0xe4 at 4x, 0x2 at 2x);
+        // zeros made every pixel "one fragment" and switched anti-aliasing off.
         const uint32_t* vd = static_cast<const uint32_t*>(desc);
         uint32_t td[11];
         memcpy(td, rr->desc32(), sizeof td);
+        uint32_t samples = td[5];
         td[2] = 1, td[3] = 1, td[4] = vd[0], td[5] = 1, td[6] = 0, td[7] = 0, td[8] = 0x8, td[9] = 0, td[10] = 0;
+        uint8_t fmask = vd[0] == 62 /* R8_UINT */ ? (samples == 4 ? 0xe4 : samples == 2 ? 0x2 : 0) : 0;
+        if (getenv("FL_FMASK_ZERO")) fmask = 0;  // bisect aid: the old all-zero FMASK (no MSAA resolve)
+        if (vd[0] == 62 && samples > 1 && !fmask) log_once("STUB: FMASK view of an MSAA target, sample count", samples);
+        std::vector<uint8_t> init(fmask ? size_t(td[0]) * td[1] : 0, fmask);
+        struct { const void* mem; UINT pitch, slice; } data{init.data(), td[0], td[0] * td[1]};
         void* stand_in = nullptr;
-        if (dx<HRESULT>(dev_of(self)->dxvk, dd::CreateTexture2D, td, nullptr, &stand_in) >= 0) {
+        if (dx<HRESULT>(dev_of(self)->dxvk, dd::CreateTexture2D, td, fmask ? &data : nullptr, &stand_in) >= 0) {
+            if (fmask) log_once("STUB: FMASK view of a multisampled target reads the identity map, samples", samples);
             uint32_t vd2[6] = {vd[0], vd[1], 0, 1, 0, 0};
             hr = dx<HRESULT>(dev_of(self)->dxvk, desktop_slot, stand_in, vd2, &obj);
             dx_release(stand_in);
