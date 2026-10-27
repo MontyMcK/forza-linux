@@ -121,11 +121,19 @@ uint32_t autopress_buttons() {
 
 }  // namespace
 
+// A scripted run (FL_AUTOPRESS) ignores the real controller and keyboard, so a
+// test started while someone plays gets only its script (FL_AUTOPRESS_LIVE=1
+// keeps them).
+bool scripted() {
+    static const bool on = getenv("FL_AUTOPRESS") && !getenv("FL_AUTOPRESS_LIVE");
+    return on;
+}
+
 PadState read_pad() {
     std::lock_guard lock(g_mutex);
     PadState s{};
     s.timestamp = SDL_GetTicksNS() / 100;
-    if (SDL_Gamepad* p = pad()) {
+    if (SDL_Gamepad* p = scripted() ? nullptr : pad()) {
         auto b = [&](SDL_GamepadButton btn, uint32_t bit) {
             if (SDL_GetGamepadButton(p, btn)) s.buttons |= bit;
         };
@@ -143,7 +151,7 @@ PadState read_pad() {
         s.rx = axis(p, SDL_GAMEPAD_AXIS_RIGHTX);
         s.ry = -axis(p, SDL_GAMEPAD_AXIS_RIGHTY);
     }
-    keyboard(&s);  // the keyboard works alongside a gamepad too
+    if (!scripted()) keyboard(&s);  // the keyboard works alongside a gamepad too
     uint32_t auto_b = autopress_buttons();
     if (auto_b & kAutoRT) s.right_trigger = 1;
     if (auto_b & kAutoLT) s.left_trigger = 1;
@@ -160,7 +168,7 @@ PadState read_pad() {
 
 void set_vibration(float left, float right, float lt, float rt) {
     std::lock_guard lock(g_mutex);
-    if (SDL_Gamepad* p = pad()) {
+    if (SDL_Gamepad* p = scripted() ? nullptr : pad()) {
         auto u16 = [](float v) { return static_cast<Uint16>((v < 0 ? 0 : v > 1 ? 1 : v) * 65535); };
         SDL_RumbleGamepad(p, u16(left), u16(right), 100);
         SDL_RumbleGamepadTriggers(p, u16(lt), u16(rt), 100);

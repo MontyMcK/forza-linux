@@ -103,9 +103,11 @@ MH_POSITIONS = [("top-left", "Top left"), ("top-center", "Top centre"), ("top-ri
 DXVK_HUD_ITEMS = [("fps", "FPS"), ("frametimes", "Frame times"), ("gpuload", "GPU load"), ("memory", "Memory"),
                   ("submissions", "Submissions"), ("drawcalls", "Draw calls"), ("pipelines", "Pipelines"),
                   ("compiler", "Shader compiler"), ("version", "DXVK version"), ("devinfo", "Device info")]
-FRAME_PACING = [("", "Console timing: 30 fps"),
-                ("dynamic", "Dynamic (not working yet: runs too fast)"),
-                ("off", "Uncapped, game runs too fast")]
+FRAME_PACING = [("", "Console: 30 fps"),
+                ("dynamic", "Dynamic: any frame rate, normal game speed"),
+                ("off", "Uncapped (game runs too fast; testing only)")]
+FPS_CAPS = [(0, "Monitor refresh rate"), (60, "60 fps"), (90, "90 fps"), (120, "120 fps"), (144, "144 fps"),
+            (165, "165 fps"), (240, "240 fps")]
 DISPLAY_MODES = [("windowed", "Windowed"), ("borderless", "Borderless window"), ("fullscreen", "Fullscreen")]
 WINDOW_SIZES = [("", "1280 × 720 (runtime default)"), ("1600x900", "1600 × 900"), ("1920x1080", "1920 × 1080"),
                 ("2560x1440", "2560 × 1440"), ("3840x2160", "3840 × 2160"), ("custom", "Custom…")]
@@ -1180,9 +1182,9 @@ class PlayPage(QWidget):
         self.skip_chip = self._chip(quick, "Skip long movies", "Intro and opening", b.toggle("skip_intro_movie"))
         self._chip(quick, "MangoHud", "Performance overlay", b.toggle("mangohud"))
         self._chip(quick, "GameMode", "CPU boost", b.toggle("gamemode"))
-        self.fps_combo = b.combo("frame_pacing", [("", "30 fps"), ("dynamic", "Dynamic (WIP)"), ("off", "Uncapped")],
+        self.fps_combo = b.combo("frame_pacing", [("", "30 fps"), ("dynamic", "Dynamic"), ("off", "Uncapped")],
                                  130)
-        self._chip(quick, "Frame rate", "30 fps is the stable one", self.fps_combo)
+        self._chip(quick, "Frame rate", "Dynamic: faster, normal speed", self.fps_combo)
         self._chip(quick, "Sound", "Game audio", b.toggle("audio"))
         v.addLayout(quick)
 
@@ -1248,11 +1250,15 @@ class SettingsPage(QScrollArea):
         size = b.combo("window", WINDOW_SIZES)
         disp.add_row("Window size", "The game window starts at this size; you can resize it while playing. "
                      "In fullscreen, a size picks the screen resolution (the default keeps your desktop's).", size)
-        disp.add_row("Frame rate", "The game was made for 30 fps. Dynamic lets it run faster while game time "
-                     "follows the real clock; uncapped runs the game too fast.",
+        disp.add_row("Frame rate", "The game was made for 30 fps (its clock then steps 1/30 s a frame, so it slows "
+                     "down when frames drop). Dynamic runs at any frame rate with the game clock on real time.",
                      b.combo("frame_pacing", FRAME_PACING, 340))
-        self.cap_row = disp.add_row("FPS cap", "Dynamic mode only. Off: up to your monitor's refresh rate.",
-                                    b.spin("fps_cap", 0, 500, " fps", "Off", 10))
+        caps = list(FPS_CAPS)
+        if all(v != self.win.cfg["fps_cap"] for v, _ in caps):
+            caps.append((self.win.cfg["fps_cap"], f"{self.win.cfg['fps_cap']} fps"))
+        self.cap_row = disp.add_row("FPS cap", "Dynamic mode only. Without variable refresh, a rate that divides "
+                                    "your monitor's refresh looks smoothest (e.g. 130 or 260 on a 260 Hz screen).",
+                                    b.combo("fps_cap", caps, 220))
         self.custom = b.line("window_custom", "1920x1080", 140)
         self.custom_row = disp.add_row("Custom size", "WIDTHxHEIGHT", self.custom)
         disp.add_row("Sound", "Off runs the game with silent audio output.", b.toggle("audio"))
@@ -1993,12 +1999,13 @@ class MainWindow(QMainWindow):
         # isn't a multiple of that, frames stay up for uneven times (judder).
         screen = self.screen() or QGuiApplication.primaryScreen()
         hz = screen.refreshRate() if screen else 0
-        if hz > 0 and not cfg["frame_pacing"]:
-            per = hz / 29.97
+        fps = 29.97 if not cfg["frame_pacing"] else cfg["fps_cap"] if cfg["frame_pacing"] == "dynamic" else 0
+        if hz > 0 and 0 < fps < hz - 0.5:  # at or above the refresh rate every refresh shows a new frame
+            per = hz / fps
             if abs(per - round(per)) > 0.05:
-                notes.append(f"Your display runs at {hz:.0f} Hz, which 30 fps doesn't divide evenly, so motion "
-                             "judders slightly. For perfectly smooth frames use a 60/120/240 Hz mode, or turn on "
-                             "Adaptive Sync and play fullscreen.")
+                notes.append(f"Your display runs at {hz:.0f} Hz, which {fps:.0f} fps doesn't divide evenly, so "
+                             "motion judders slightly. For perfectly smooth frames pick a frame rate that divides "
+                             "the refresh rate, or turn on Adaptive Sync and play fullscreen.")
         p.banner.setText("\n".join(notes))
         p.banner.setVisible(bool(notes))
 

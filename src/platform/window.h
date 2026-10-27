@@ -11,5 +11,6 @@ void video_init();          // idempotent; also creates the window
 SDL_Window* window();       // created on first call
 void pump_events();         // called from CoreDispatcher::ProcessEvents
 void window_size(int* w, int* h);
+float refresh_rate();       // of the window's display, in Hz (0 if unknown)
 
 }  // namespace fl::platform

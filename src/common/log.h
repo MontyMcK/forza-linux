@@ -8,6 +8,8 @@ namespace fl {
 
 void log_init();
 bool log_enabled(const char* channel);
+// Seconds since log_init (the timestamps in log lines).
+double run_time();
 void log_write(const char* channel, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
 [[noreturn]] void fatal(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 

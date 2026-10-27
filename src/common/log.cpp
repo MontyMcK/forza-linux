@@ -38,6 +38,8 @@ void vwrite(const char* channel, const char* fmt, va_list ap) {
 
 }  // namespace
 
+double run_time() { return elapsed(); }
+
 void log_init() {
     clock_gettime(CLOCK_MONOTONIC, &g_start);
     if (const char* c = getenv("FL_LOG")) {

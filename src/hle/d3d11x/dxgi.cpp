@@ -193,8 +193,21 @@ std::set<uint64_t> screenshot_frames() {
     return s;
 }
 
+// FL_SCREENSHOT_AT_TIME=t[,t...]: screenshots/time_<t>.png at the first Present
+// after t seconds of run time (to compare game speed at different frame rates).
+std::vector<double> screenshot_times() {
+    std::vector<double> v;
+    if (const char* e = getenv("FL_SCREENSHOT_AT_TIME"))
+        for (const char* p = e; *p;) {
+            v.push_back(strtod(p, const_cast<char**>(&p)));
+            while (*p == ',' || *p == ' ') p++;
+        }
+    std::sort(v.begin(), v.end());
+    return v;
+}
+
 // Copy back buffer 0 to a PNG (RGBA8 / BGRA8 / RGB10A2 back buffers).
-void screenshot(SwapChain* sc) {
+void screenshot(SwapChain* sc, std::string name = "") {
     namespace dd = desktop::dev;
     namespace dc = desktop::ctx;
     void* tex = nullptr;
@@ -242,7 +255,7 @@ void screenshot(SwapChain* sc) {
             }
             dx<void>(ctx, dc::Unmap, staging, 0u);
             mkdir("screenshots", 0755);
-            std::string path = "screenshots/frame_" + std::to_string(sc->frame) + ".png";
+            std::string path = "screenshots/" + (name.empty() ? "frame_" + std::to_string(sc->frame) : name) + ".png";
             bool ok = write_png(path, rgba.data(), w, h);
             log_write("d3d", "screenshot %s (%ux%u fmt %u): %s", path.c_str(), w, h, fmt, ok ? "ok" : "FAILED");
         }
@@ -267,8 +280,14 @@ void pace_present(UINT sync) {
     if (c.pacing == Config::Pacing::console) {
         if (sync == 0) return;
         period = sync * 16'683'333LL;  // a 59.94 Hz vblank (1001/60000 s): the game steps 1/29.97 s per frame
-    } else if (c.pacing == Config::Pacing::dynamic && c.fps_cap > 0) {
-        period = 1'000'000'000LL / c.fps_cap;
+    } else if (c.pacing == Config::Pacing::dynamic) {
+        // Without a cap, the display's refresh rate: unpaced, the loading
+        // screen presented ~15000 frames a second and starved the loaders.
+        static int64_t refresh_period = [] {
+            float hz = platform::refresh_rate();
+            return static_cast<int64_t>(1e9 / (hz > 20 ? hz : 60));
+        }();
+        period = c.fps_cap > 0 ? 1'000'000'000LL / c.fps_cap : refresh_period;
     } else {
         return;
     }
@@ -340,6 +359,14 @@ WINAPI HRESULT sc_Present(Iface* self, UINT sync, UINT flags) {
     FL_LOG(fence, "present -> frame %llu", static_cast<unsigned long long>(sc->frame));
     if (sc->frame == 1) log_write("d3d", "first Present (sync %u flags 0x%x)", sync, flags);
     if (shots.count(sc->frame)) screenshot(sc);
+    static std::vector<double> times = screenshot_times();
+    static size_t next_time = 0;
+    if (next_time < times.size() && run_time() >= times[next_time]) {
+        char name[32];
+        snprintf(name, sizeof name, "time_%g", times[next_time]);
+        screenshot(sc, name);
+        while (next_time < times.size() && run_time() >= times[next_time]) next_time++;
+    }
     trace::on_present(sc->frame + 1);
     if (config().pacing != Config::Pacing::off) {
         pace_present(sync);

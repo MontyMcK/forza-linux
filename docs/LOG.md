@@ -308,3 +308,10 @@ Next: check the cost of the full 4-sample resolve (FL_LOG=fps) and other users o
 - FL_DISPLAY_MODE=windowed|borderless|fullscreen (window.cpp; FL_FULLSCREEN=1 still means borderless). Borderless = a borderless window over the display at its desktop mode; fullscreen = an SDL exclusive display mode, the closest to FL_WINDOW if set, else the desktop mode (Wayland: a smaller mode is scaled; the output's own mode and refresh stay). Both start on the primary display (a new window otherwise goes to the monitor KWin picks). F11/Alt+Enter switches between windowed and the chosen mode.
 - Launcher: "Display mode" combo (Windowed / Borderless window / Fullscreen) replaces the fullscreen toggle; an old `"fullscreen": true` config becomes borderless.
 - Checked: each mode on Monty's two-monitor KDE Wayland desktop (spectacle screenshots: windowed window; borderless and both fullscreen sizes fill DP-2 and render; logs "display mode: fullscreen 1920x1080 @ 260.00 Hz" / "1280x720"). Not checked: the F11 toggle (no way to send keys from the agent).
+
+## 2026-10-27 (afternoon): Claude: dynamic frame rate at normal game speed
+
+- FL_FRAME_PACING=dynamic now works (FINDINGS §6c "Dynamic frame rate works"): a checked patch of the update-step branch (src/loader/game_patches.cpp), paced to FL_FPS_CAP or the display's refresh rate. Verified by timed acceleration at ~95 fps, 60 fps and console 30 fps.
+- Launcher: Frame rate "Dynamic: any frame rate, normal game speed" and an FPS cap preset list (monitor refresh, 60, 90, 120, 144, 165, 240); the judder hint knows the cap.
+- Test aids: FL_SCREENSHOT_AT_TIME=<s,...> (screenshots/time_<s>.png), FL_BREAK_XMM=1 (float arguments at breakpoints); scripted runs (FL_AUTOPRESS) ignore the real controller and keyboard and don't rumble it (FL_AUTOPRESS_LIVE=1 keeps them), so a test started while Monty plays isn't driven by his pad.
+- Not done: 120 fps in the open world (GPU-bound ~90 fps with the full 4x MSAA resolve): optimisation later, as Monty asked.

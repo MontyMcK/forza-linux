@@ -487,6 +487,13 @@ static void trap_handler(int, siginfo_t* si, void* uc_) {
                               reinterpret_cast<const char*>(g[REG_RCX] + strtoull(getenv("FL_BREAK_RCXSTR"), nullptr, 16)));
             if (c < repeat && getenv("FL_BREAK_CSTR") && g[REG_RCX] > 0x10000)
                 fl::log_write("break", "  rcx cstr '%.200s'", reinterpret_cast<const char*>(g[REG_RCX]));
+            // FL_BREAK_XMM=1: the low floats of xmm0-xmm3 (float arguments).
+            if (c < repeat && getenv("FL_BREAK_XMM")) {
+                const auto* fp = static_cast<ucontext_t*>(uc_)->uc_mcontext.fpregs;
+                float f[4];
+                for (int i = 0; i < 4; i++) memcpy(&f[i], &fp->_xmm[i].element[0], 4);
+                fl::log_write("break", "  xmm0-3 %g %g %g %g", f[0], f[1], f[2], f[3]);
+            }
             // FL_BREAK_DEREF=<off> in repeat mode: the value at [rcx+off] (as a game rva if in the image).
             if (c < repeat && getenv("FL_BREAK_DEREF") && g[REG_RCX] > 0x10000) {
                 uint64_t v = *reinterpret_cast<uint64_t*>(g[REG_RCX] + strtoull(getenv("FL_BREAK_DEREF"), nullptr, 16));

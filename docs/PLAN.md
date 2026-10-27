@@ -219,6 +219,8 @@ Azimuth runs the game because the GPU reads the game's memory directly. Our copy
 
 - [ ] Racing wheel (`Microsoft.Xbox.Input.Wheel`) → SDL joystick/haptics
 - [x] Frame pacing: 30 fps on a virtual 59.94 Hz vblank on any monitor (the update steps a fixed 1/29.97 s per frame); display modes (FL_DISPLAY_MODE=windowed|borderless|fullscreen, F11/Alt+Enter); launcher settings (2026-10-27).
+- [x] Dynamic frame rate at real-time game speed (FL_FRAME_PACING=dynamic, FL_FPS_CAP; 2026-10-27).
+- [ ] Reach 120 fps in the open world (GPU-bound ~90 fps at 4x MSAA).
 - [ ] Dynamic / uncapped frame rate at real speed: the update step is rva 0xf58770, the engine options are `synchroniseUpdateToRenderThread` / `unlockframerate` (FINDINGS §6c). Find how options reach the parser (rva 0x299950), or patch the `je` at rva 0xf587dd. The UI clock also steps per frame (Azimuth's "UI step"/"UI clock tick").
 - [ ] Settings: resolution, FOV
 - [x] Write tracking per frame instead of per bind (placement "frame scan", hot/cold resources), ~4.7 → ~1 ms per frame; yield backoff for the game's spin semaphores (~2 cores less at 30 fps) (2026-10-27).

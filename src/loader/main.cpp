@@ -11,6 +11,7 @@
 #include "common/config.h"
 #include "common/log.h"
 #include "loader/crash.h"
+#include "loader/game_patches.h"
 #include "loader/imports.h"
 #include "loader/pe_image.h"
 #include "loader/thread_env.h"
@@ -62,15 +63,6 @@ void parse_args(int argc, char** argv) {
             fatal("FL_FRAME_PACING=%s: use console, dynamic or off", p);
     }
     if (const char* f = getenv("FL_FPS_CAP")) c.fps_cap = atoi(f);
-    if (c.pacing == Config::Pacing::dynamic) {
-        // UNIMPLEMENTED: the retail game never parses these from argv (its
-        // option parser rva 0x299950 doesn't run), so the update step stays
-        // fixed and the game runs too fast. FINDINGS §6c has where to look next.
-        FL_ERROR("UNIMPLEMENTED FL_FRAME_PACING=dynamic: the engine options don't reach the game yet, so the "
-                 "update step is still fixed and the game runs too fast above 30 fps");
-        c.game_args.push_back("synchroniseUpdateToRenderThread=0");
-        c.game_args.push_back("unlockframerate");
-    }
     if (c.game_dir.empty()) usage(argv[0]);
     c.game_dir = std::filesystem::absolute(c.game_dir).lexically_normal().string();
     if (!c.game_dir.empty() && c.game_dir.back() == '/') c.game_dir.pop_back();
@@ -117,6 +109,7 @@ int main(int argc, char** argv) {
     log_write("loader", "data dir: %s", config().data_dir.c_str());
 
     loader::main_image() = loader::map_image(config().exe_path);
+    loader::apply_game_patches(loader::main_image());
     int missing = loader::resolve_imports(loader::main_image());
     if (missing) log_write("loader", "%d imports are unimplemented traps (they abort when called)", missing);
     loader::protect_image(loader::main_image());

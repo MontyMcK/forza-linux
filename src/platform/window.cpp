@@ -146,6 +146,13 @@ SDL_Window* window() {
     return g_window;
 }
 
+float refresh_rate() {
+    if (!g_window) return 0;
+    SDL_DisplayID d = SDL_GetDisplayForWindow(g_window);
+    const SDL_DisplayMode* m = d ? SDL_GetCurrentDisplayMode(d) : nullptr;
+    return m ? m->refresh_rate : 0;
+}
+
 void window_size(int* w, int* h) {
     if (!g_window || !SDL_GetWindowSizeInPixels(g_window, w, h)) parse_size(w, h);
 }
