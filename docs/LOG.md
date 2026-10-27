@@ -315,3 +315,7 @@ Next: check the cost of the full 4-sample resolve (FL_LOG=fps) and other users o
 - Launcher: Frame rate "Dynamic: any frame rate, normal game speed" and an FPS cap preset list (monitor refresh, 60, 90, 120, 144, 165, 240); the judder hint knows the cap.
 - Test aids: FL_SCREENSHOT_AT_TIME=<s,...> (screenshots/time_<s>.png), FL_BREAK_XMM=1 (float arguments at breakpoints); scripted runs (FL_AUTOPRESS) ignore the real controller and keyboard and don't rumble it (FL_AUTOPRESS_LIVE=1 keeps them), so a test started while Monty plays isn't driven by his pad.
 - Not done: 120 fps in the open world (GPU-bound ~90 fps with the full 4x MSAA resolve): optimisation later, as Monty asked.
+
+## 2026-10-27 (afternoon): Claude: repo renamed to Open Horizon 2
+
+- GitHub repo MontyMcK/forza-linux renamed to **MontyMcK/open-horizon-2** at Monty's request (a proprietary project has a similar name); GitHub redirects the old URL. README title updated; the binary, the launcher and the FL_* variables keep the forza-linux name for now.

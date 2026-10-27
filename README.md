@@ -1,6 +1,6 @@
-# forza-linux
+# Open Horizon 2
 
-A native Linux runtime for the Xbox One version of Forza Horizon 2.
+An open-source, native Linux runtime for the Xbox One version of Forza Horizon 2. (The runtime binary is still called `forza-linux`.)
 
 The Xbox One CPU is x86-64, so the game's code runs directly on your CPU. This project provides the rest:
 - a PE loader
