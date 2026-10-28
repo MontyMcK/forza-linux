@@ -97,16 +97,9 @@ struct Unwrapped {
 // DXVK object (AddRef'd by a DXVK getter) -> our wrapper, AddRef'd.
 void* rewrap(void* obj) {
     if (!obj) return nullptr;
-    DeviceChild* w = acquire_wrapper(obj);
-    if (!w) {
-        // A state object the game released while it was still bound (DXVK
-        // keeps it alive, our wrapper is gone): give it a new wrapper, as the
-        // bound reference would have kept the D3D11 object alive.
-        w = wrap_orphan_state(obj);
-        if (!w) fatal("d3d: DXVK returned object %p that has no wrapper", obj);
-        log_once("d3d: a released state object was still bound: new wrapper", 0);
-        return &w->iface;  // takes over the getter's reference
-    }
+    DeviceChild* w = wrapper_of(obj);
+    if (!w) fatal("d3d: DXVK returned object %p that has no wrapper", obj);
+    w->add_ref();
     dx_release(obj);
     return &w->iface;
 }

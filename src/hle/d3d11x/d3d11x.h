@@ -79,13 +79,6 @@ struct DeviceChild : winrt::Object {
 
 // The wrapper for a DXVK object, or nullptr.
 DeviceChild* wrapper_of(void* dxvk_obj);
-// The live wrapper of a DXVK object with a new reference, or null (none, or
-// one being released right now).
-DeviceChild* acquire_wrapper(void* dxvk_obj);
-// A wrapper for a DXVK state object that has none (see rewrap), or null if
-// obj is not a blend, depth-stencil, rasterizer or sampler state.
-DeviceChild* wrap_orphan_state(void* dxvk_obj);
-DeviceX* device_for_dxvk(void* dxvk_device);  // our device for a DXVK device (null if unknown)
 // Another DXVK object that stands for wrapper `w` (wrapper_of finds it).
 void register_alias(void* dxvk_obj, DeviceChild* w);
 void unregister_alias(void* dxvk_obj, DeviceChild* w);

@@ -239,32 +239,13 @@ Vtable& sampler_vt() {
     return v;
 }
 
-// DXVK returns the existing object for a state description it has seen (as
-// D3D11 does). A second wrapper for it took over the registry entry and its
-// release then dropped the entry while the first was still in use, so
-// OMGetDepthStencilState found no wrapper and the game aborted. Hand back the
-// existing wrapper instead, like D3D11 hands back the same interface.
-HRESULT wrap_state(DeviceX* d, HRESULT hr, void* obj, void** out, Vtable& vt, const char16_t* name, const GUID& iid) {
-    if (hr >= 0 && out && obj)
-        if (DeviceChild* same = acquire_wrapper(obj)) {
-            log_once("d3d: state object with an existing description: same wrapper again", 0);
-            dx_release(obj);  // the create's reference: the wrapper holds its own
-            void* have = nullptr;
-            if (same->query(iid, &have) < 0) same->expose(iid, &same->iface);
-            else same->release();  // query's reference
-            *out = &same->iface;
-            return hr;
-        }
-    return wrap(d, hr, obj, out, vt, name, iid);
-}
-
 // GetDesc1 only exists on the "1" variants; DXVK objects implement both anyway.
 #define FL_STATE_CREATE(Name, desktop_slot, vtfn, iid)                                                \
     WINAPI HRESULT dev_Create##Name(Iface* self, const void* desc, void** out) {                      \
         void* obj = nullptr;                                                                          \
         HRESULT hr = dx<HRESULT>(dev_of(self)->dxvk, desktop_slot, desc, out ? &obj : nullptr);       \
         if (hr < 0) FL_ERROR("d3d: Create" #Name " failed: 0x%08x", static_cast<uint32_t>(hr));       \
-        return wrap_state(dev_of(self), hr, obj, out, vtfn(), u"D3D11" #Name, iid);                   \
+        return wrap(dev_of(self), hr, obj, out, vtfn(), u"D3D11" #Name, iid);                         \
     }
 FL_STATE_CREATE(BlendState, dd::CreateBlendState, blend_vt, IID_ID3D11BlendState)
 FL_STATE_CREATE(DepthStencilState, dd::CreateDepthStencilState, depth_vt, IID_ID3D11DepthStencilState)
@@ -273,34 +254,6 @@ FL_STATE_CREATE(SamplerState, dd::CreateSamplerState, sampler_vt, IID_ID3D11Samp
 FL_STATE_CREATE(BlendState1, dd::CreateBlendState1, blend_vt, IID_ID3D11BlendState1)
 FL_STATE_CREATE(RasterizerState1, dd::CreateRasterizerState1, raster_vt, IID_ID3D11RasterizerState1)
 #undef FL_STATE_CREATE
-
-}  // namespace
-
-DeviceChild* wrap_orphan_state(void* obj) {
-    struct Kind { const GUID* iid; Vtable& (*vt)(); const char16_t* name; };
-    static const Kind kinds[] = {
-        {&IID_ID3D11DepthStencilState, depth_vt, u"D3D11DepthStencilState"},
-        {&IID_ID3D11BlendState, blend_vt, u"D3D11BlendState"},
-        {&IID_ID3D11RasterizerState, raster_vt, u"D3D11RasterizerState"},
-        {&IID_ID3D11SamplerState, sampler_vt, u"D3D11SamplerState"},
-    };
-    for (const Kind& k : kinds) {
-        void* q = nullptr;
-        if (dx<HRESULT>(obj, 0 /* QueryInterface */, k.iid, &q) < 0 || !q) continue;
-        dx_release(q);
-        void* dev_obj = nullptr;
-        dx<void>(obj, 3 /* ID3D11DeviceChild::GetDevice */, &dev_obj);
-        if (dev_obj) dx_release(dev_obj);
-        DeviceX* d = device_for_dxvk(dev_obj);
-        if (!d) return nullptr;
-        auto* c = new DeviceChild(k.name, d, k.vt(), obj);
-        c->expose(*k.iid, &c->iface);
-        return c;
-    }
-    return nullptr;
-}
-
-namespace {
 
 // Device slot 67: CreateSamplerStateX(const u32 hardware sampler[4], out).
 WINAPI HRESULT dev_CreateSamplerStateX(Iface* self, const uint32_t* hw, void** out) {
