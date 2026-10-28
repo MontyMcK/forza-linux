@@ -5,6 +5,7 @@
 // The Xbox ERA build may differ: if a slot traps or misbehaves, verify it
 // against the game's call site and note it in FINDINGS.md.
 
+#include <atomic>
 #include <chrono>
 #include <thread>
 
@@ -117,10 +118,39 @@ CoreApplicationView* g_main_view = nullptr;
 constexpr GUID IID_ICoreApplicationResourceAvailability = {0x9FF3799E, 0x6E83, 0x468C,
                                                           {0xA5, 0xB0, 0x50, 0x1C, 0xE6, 0xBB, 0x0F, 0xA1}};
 
+// ---------------------------------------------------------------- Xbox GPU policy
+// Xbox-only statics interface {42A6A529-3CC6-4867-B5B7-6D1FAF5325F9} on
+// CoreApplication: a bool property (S+0 get, S+1 put) the game sets around
+// movies and cinematics and at the end of an event (call site rva 0x1101950),
+// the console's Kinect GPU reservation switch (Azimuth implements it as
+// "ApplicationGpuPolicy" on its CoreApplication). Without it the activation
+// failed and the game threw a Platform::Exception out of that code (rva
+// 0x11019a1): a finished mission was never registered. There is no Kinect
+// reservation here: the value is only kept.
+constexpr GUID IID_ICoreApplicationGpuPolicy = {0x42A6A529, 0x3CC6, 0x4867,
+                                                {0xB5, 0xB7, 0x6D, 0x1F, 0xAF, 0x53, 0x25, 0xF9}};
+
 // ---------------------------------------------------------------- CoreApplication statics
 
 struct CoreApplicationStatics : Object {
     EventSource suspending, resuming, availability_changed;
+    std::atomic<bool> gpu_policy{false};
+
+    static WINAPI HRESULT get_GpuPolicy(Iface* self, uint8_t* out) {
+        *out = self->as<CoreApplicationStatics>()->gpu_policy.load();
+        return S_OK;
+    }
+    static WINAPI HRESULT put_GpuPolicy(Iface* self, uint8_t on) {
+        FL_LOG(winrt, "CoreApplication GPU policy (Kinect reservation off) = %d", on);
+        self->as<CoreApplicationStatics>()->gpu_policy = on != 0;
+        return S_OK;
+    }
+    static Vtable& vt_gpu_policy() {
+        static Vtable v = Vtable("ICoreApplicationGpuPolicy", S + 2)
+                              .set(S + 0, &get_GpuPolicy)
+                              .set(S + 1, &put_GpuPolicy);
+        return v;
+    }
 
     static WINAPI HRESULT get_ResourceAvailability(Iface*, int32_t* out) {
         *out = 0;  // Full
@@ -209,9 +239,11 @@ struct CoreApplicationStatics : Object {
 
     Iface iapp{vt(), this};
     Iface iresources{vt_resources(), this};
+    Iface igpu{vt_gpu_policy(), this};
     CoreApplicationStatics() : Object(u"Windows.ApplicationModel.Core.CoreApplication") {
         expose(IID_ICoreApplication, &iapp);
         expose(IID_ICoreApplicationResourceAvailability, &iresources);
+        expose(IID_ICoreApplicationGpuPolicy, &igpu);
     }
 };
 
