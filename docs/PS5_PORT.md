@@ -29,7 +29,12 @@ Scripts (`tools/ps5/`, settings in the gitignored `tools/ps5/ps5.env`; `ps5.env.
 
 | Script | Does |
 | --- | --- |
-| `build.sh probe` | builds the probe payload into `build-ps5/probe/` |
+| `setup_deps.sh` | fetches the pinned PS5_Vulkan / PS5_PayloadSDK / PS5_Mesa into `build-ps5/deps/` and prepares PS5_Vulkan's title toolchain (SDK fork, clean-room `libc.prx` checked against its pinned hash, `ps5-native-tool`) |
+| `cc.sh` | the PS5 C/C++ compiler (PS5_Vulkan's `prospero-clang18` over the pinned SDK fork) |
+| `link_title.sh OUT/eboot.bin INPUTS` | links with PS5_Vulkan's recipe (app CRT, PIE script, SDK stubs, `libps5platform.a`), refuses imports a title gets as NULL, signs the fake SELF |
+| `package.sh EBOOT [--zip]` | stages `build-ps5/title/PPSA99642/` (eboot, `ps5/title/sce_sys/`, `libc.prx`), audits the staged folder and builds nothing if the audit fails; `--zip` makes the release zip |
+| `build.sh probe` / `probe-title` / `launch` / `copydump` | the probe payload; the probe as the title's eboot, packaged; a payload that starts the title; the on-console dump copy |
+| `make_icon.sh` | draws the original home-screen icon `ps5/title/sce_sys/icon0.png` |
 | `send_payload.sh ELF` | sends an ELF to elfldr (starting elfldr through pldmgr if needed) |
 | `pull_logs.sh [DIR...]` | copies `PS5_LOG_REMOTE` (or DIRs) to `research/private/ps5-logs/<time>/`, `latest` links to it |
 | `upload_title.sh [DIR]` | audits, then uploads the title folder to `/data/homebrew/PPSA99642` |
@@ -129,7 +134,8 @@ The PS5 binary statically links PS5_Vulkan's RADV build and link recipe, and the
 - [ ] `cmake/ps5.cmake` toolchain
 - [ ] Static PS5_Vulkan (RADV release archive), DXVK (+ patches, VK_KHR_display WSI), FFmpeg XMA, addrlib
 - [x] `tools/check_no_game_data.sh --package DIR` audit (name+size vs a live game_data listing, byte compare on size matches, game types and Rule 0 names, 200 MiB cap, magics)
-- [ ] `tools/ps5/package.sh`: audit first, then title folder + release zip
+- [x] `tools/ps5/package.sh`: audit first, then title folder + release zip (2026-10-30; title identity and original icon in `ps5/title/sce_sys/`)
+- [x] Title toolchain from PS5_Vulkan (`setup_deps.sh`, `cc.sh`, `link_title.sh`): a C title links, signs and packages (probe title, 2026-10-30). PS5_Vulkan f410e67's own skeleton build misses `libps5platform.a` (undefined `ps5_fp_ieee` from app_crt); `link_title.sh` links it
 
 ### Step 6: PS5 game backend
 - [ ] PS5 side of `src/platform/os/`; game folder only from the launcher or `--game-dir`

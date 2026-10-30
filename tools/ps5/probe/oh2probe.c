@@ -5,9 +5,12 @@
  * reservation, signal contexts (register and FP offsets), and write faults
  * resolved by a handler. INFO lines carry the numbers behind them.
  *
- * Built as a payload by tools/ps5/build.sh probe and started with
- * tools/ps5/send_payload.sh. The log goes to OH2_PROBE_LOG (default below),
- * one fsync'd line at a time so a crash leaves everything before it.
+ * Built as a payload by tools/ps5/build.sh probe (started with
+ * tools/ps5/send_payload.sh), or with OH2_PROBE_TITLE as the eboot of a title
+ * (tools/ps5/build.sh probe-title), which adds what only a title can answer:
+ * its sandbox (which paths it sees and can read), direct-memory budget, and
+ * open-file and malloc limits. The log is written one fsync'd line at a time
+ * so a crash leaves everything before it.
  * Our own code, written from public FreeBSD and libkernel interfaces.
  */
 #include <dirent.h>
@@ -26,12 +29,15 @@
 #include <time.h>
 #include <unistd.h>
 
-#ifndef OH2_PROBE_LOG
-#define OH2_PROBE_LOG "/data/homebrew/PPSA99642/logs/probe-payload.txt"
-#endif
-#ifndef OH2_PROBE_CONTEXT
+#ifdef OH2_PROBE_TITLE
+#define OH2_PROBE_CONTEXT "title"
+/* The first of these a title can create (its sandbox may not show /data). */
+static const char *const log_paths[] = {"/data/homebrew/PPSA99642/logs/probe-title.txt", "/download0/probe-title.txt"};
+#else
 #define OH2_PROBE_CONTEXT "payload"
+static const char *const log_paths[] = {"/data/homebrew/PPSA99642/logs/probe-payload.txt"};
 #endif
+#define GAME_EXE "forza_durango_release_final.exe"
 
 /* libkernel (no SDK header declares these). */
 int sceKernelAllocateDirectMemory(int64_t start, int64_t end, size_t len, size_t align, int type, int64_t *phys);
@@ -468,6 +474,32 @@ static void test_dmem(void) {
   int r = dmem_alloc(used, 1ull << 30, &big);
   CHECK(r == 0, "direct memory 1 GiB", "sceKernel%s(1 GiB) ret 0x%x", used, r);
   if (r == 0) sceKernelReleaseDirectMemory(big, 1ull << 30);
+#ifdef OH2_PROBE_TITLE
+  /* The game's own memory (the Xbox One gives a title ~5 GiB) plus the GPU's:
+   * allocate, map fixed in a reservation, touch both ends, release. */
+  for (int gib = 4; gib <= 8; gib += 4) {
+    size_t len = (size_t)gib << 30;
+    big = 0;
+    r = dmem_alloc(used, len, &big);
+    int mapped = 0;
+    if (r == 0) {
+      void *resv = (void *)0x1000000000ull;
+      if (sceKernelReserveVirtualRange(&resv, 16ull << 30, K_MAP_FIXED, 0x10000) == 0) {
+        void *a = resv;
+        if (sceKernelMapDirectMemory(&a, len, K_READ | K_WRITE, K_MAP_FIXED, big, 0x10000) == 0) {
+          volatile uint64_t *w = a;
+          w[0] = 1;
+          w[len / 8 - 1] = 2;
+          mapped = w[0] == 1 && w[len / 8 - 1] == 2;
+        }
+        sceKernelMunmap(resv, 16ull << 30);
+      }
+      sceKernelReleaseDirectMemory(big, len);
+    }
+    CHECK(r == 0 && mapped, "direct memory large", "%d GiB: allocate ret 0x%x, mapped and touched at both ends: %s",
+          gib, r, mapped ? "yes" : "no");
+  }
+#endif
 }
 
 /* ---- 7. signal context layout ---- */
@@ -722,10 +754,109 @@ static void test_files(void) {
   }
 }
 
+#ifdef OH2_PROBE_TITLE
+/* stat, lstat, access and a read of one path, as a title sees it. */
+static int probe_path(const char *p, int want_mz) {
+  struct stat st;
+  int s = stat(p, &st), se = s ? errno : 0;
+  int l = lstat(p, &st), le = l ? errno : 0;
+  int a = access(p, R_OK), ae = a ? errno : 0;
+  char extra[96] = "";
+  int readable = 0;
+  if (s == 0 && S_ISDIR(st.st_mode)) {
+    DIR *d = opendir(p);
+    int n = 0;
+    if (d) {
+      while (readdir(d)) n++;
+      closedir(d);
+    }
+    readable = d != 0;
+    snprintf(extra, sizeof extra, ", opendir %s (%d entries)", d ? "ok" : "fails", n);
+  } else if (s == 0) {
+    int fd = open(p, O_RDONLY);
+    char b[2] = {0};
+    int r = fd >= 0 ? (int)read(fd, b, 2) : -1;
+    if (fd >= 0) close(fd);
+    readable = r == 2 && (!want_mz || (b[0] == 'M' && b[1] == 'Z'));
+    snprintf(extra, sizeof extra, ", %lld bytes, read %s", (long long)st.st_size, readable ? "ok" : "fails");
+  }
+  INFO("sandbox", "%s: stat %d/%d lstat %d/%d access %d/%d%s", p, s, se, l, le, a, ae, extra);
+  return readable;
+}
+
+/* Finds <root>/<folder>/Mount/<exe> one level down, as the launcher will. */
+static int find_dump_under(const char *root, char *out, size_t n) {
+  DIR *d = opendir(root);
+  if (!d) return 0;
+  struct dirent *e;
+  struct stat st;
+  int found = 0;
+  while (!found && (e = readdir(d))) {
+    if (e->d_name[0] == '.') continue;
+    snprintf(out, n, "%s/%s/Mount/" GAME_EXE, root, e->d_name);
+    found = stat(out, &st) == 0;
+  }
+  closedir(d);
+  return found;
+}
+
+static void test_title_sandbox(void) {
+  const char *paths[] = {"/app0", "/app0/eboot.bin", "/download0", "/data", "/data/homebrew", "/data/homebrew/PPSA99642",
+                         "/data/OpenHorizon2", "/mnt/usb0", "/mnt/usb1", "/user", "/system"};
+  for (unsigned i = 0; i < sizeof paths / sizeof *paths; i++) probe_path(paths[i], 0);
+  char exe[512];
+  int internal = find_dump_under("/data/OpenHorizon2", exe, sizeof exe) && probe_path(exe, 1);
+  CHECK(internal, "title reads the dump on internal storage", "/data/OpenHorizon2/<folder>/Mount/" GAME_EXE "%s", internal ? "" : " not readable");
+  int usb = 0;
+  for (int i = 0; i < 8 && !usb; i++) {
+    char root[16];
+    snprintf(root, sizeof root, "/mnt/usb%d", i);
+    usb = find_dump_under(root, exe, sizeof exe) && probe_path(exe, 1);
+  }
+  INFO("title reads a dump on USB", "%s", usb ? exe : "none readable (stick may be unplugged)");
+
+  int fd = open("/download0/oh2_probe_write.tmp", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  int w = fd >= 0 ? (int)write(fd, "ok", 2) : -1;
+  if (fd >= 0) close(fd);
+  int u = unlink("/download0/oh2_probe_write.tmp");
+  CHECK(w == 2 && u == 0, "/download0 writable", "write %d, unlink %d (errno %d)", w, u, u ? errno : 0);
+}
+
+static void test_title_limits(void) {
+  static int fds[4096];
+  int n = 0, e = 0;
+  while (n < 4096) {
+    int fd = open("/app0/sce_sys/param.json", O_RDONLY);
+    if (fd < 0) {
+      e = errno;
+      break;
+    }
+    fds[n++] = fd;
+  }
+  for (int i = 0; i < n; i++) close(fds[i]);
+  INFO("open files", "%d opens of one path before failing (errno %d)", n, e);
+
+  static void *blocks[2048];
+  int m = 0;
+  while (m < 2048) {
+    char *b = malloc(1 << 20);
+    if (!b) break;
+    b[0] = 1;
+    blocks[m++] = b;
+  }
+  for (int i = 0; i < m; i++) free(blocks[i]);
+  INFO("libc malloc", "%d MiB in 1 MiB blocks before NULL (cap 2048)", m);
+}
+#endif
+
 int main(void) {
   mkdir("/data/homebrew/PPSA99642/logs", 0777);
-  log_fd = open(OH2_PROBE_LOG, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-  say("Open Horizon 2 platform probe, %s build, %s %s", OH2_PROBE_CONTEXT, __DATE__, __TIME__);
+  const char *log_path = 0;
+  for (unsigned i = 0; i < sizeof log_paths / sizeof *log_paths && log_fd < 0; i++) {
+    log_fd = open(log_paths[i], O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    log_path = log_paths[i];
+  }
+  say("Open Horizon 2 platform probe, %s build, %s %s, log %s", OH2_PROBE_CONTEXT, __DATE__, __TIME__, log_path);
   install_handlers(0);
   test_info();
   test_exec_flexible();
@@ -737,6 +868,10 @@ int main(void) {
   test_write_faults();
   test_other_signals();
   test_files();
+#ifdef OH2_PROBE_TITLE
+  test_title_sandbox();
+  test_title_limits();
+#endif
   say("DONE %d pass, %d fail", n_pass, n_fail);
   close(log_fd);
   return 0;
