@@ -99,7 +99,7 @@ The PS5 binary statically links PS5_Vulkan's RADV build and link recipe, and the
 - [x] `tools/ps5/ps5.env` (gitignored) + `ps5.env.example`
 - [x] Scripts: build, upload title, send payload, pull logs; separate dump upload behind `--i-was-asked`
 - [x] FTP round trip with a small text file (`/data/homebrew/PPSA99642/ftp_test.txt`)
-- [ ] Dump copied to Monty's USB stick (Mount/ only), sizes checked against the PC copy (copy running 2026-10-30, ~6 MB/s)
+- [x] Dump copied to Monty's USB stick (Mount/ only, 2,323 files, 41.9 GB): every name and size matches the PC copy, the exe and 20 random files byte-identical after a remount; stick ejected 2026-10-30. Monty moves it to internal storage
 - [x] elfldr installed (Monty asked)
 
 ### Step 2: research and plan
