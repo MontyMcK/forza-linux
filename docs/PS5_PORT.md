@@ -142,7 +142,9 @@ The PS5 binary statically links PS5_Vulkan's RADV build and link recipe, and the
 ### Step 6: PS5 game backend
 - [x] PS5 side of `src/platform/os/` (`src/platform/os/ps5/`): futex (umtx), files, memory (reservations + direct memory in 64 KiB units, exec via sceKernelMprotect, checked copies via sceKernelQueryMemoryProtection), thread env (sysarch GS, MXCSR 0x1f80, ids via pthread_getthreadid_np + a pthread_t registry), signal context (measured offsets), write watch (mprotect + SIGSEGV through `os::write_watch_on_fault` in the crash handler; `write_watch_before_kernel_write` before ReadFile), diagnostics. **tests/os_test.cpp: 22/22 on the console** (`build.sh os-test-title`, 2026-10-30). Audio, window, input: stubs that log UNIMPLEMENTED
 - [ ] Display (VK_KHR_display / VideoOut through DXVK), ScePad input, SceAudioOut
-- [ ] The runtime itself built for the PS5 (CMake with cmake/ps5.cmake + link_title.sh); game folder only from the launcher or `--game-dir`. The PS5 target rejects ms_abi: compile with `-target x86_64-unknown-freebsd9` and the flags in FINDINGS 7.6 (a test object links into a title)
+- [x] The runtime built for the PS5: `tools/ps5/build.sh runtime` (cc-win.sh for our code, PS5-target zlib and addrlib, DXVK stand-in `tools/ps5/m1/no_dxvk.cpp` until Step 5's DXVK), linked with link_title.sh; started by `tools/ps5/run_title.sh` (arguments via launch-args.txt; `--env NAME=VALUE` sets FL_LOG_FILE etc.)
+- [ ] Title memory at the Xbox's fixed addresses: the game reserves 0x60000000000 (12 GiB) and 0x60300000000, 0x800000000 and 0xc00000000 (4 GiB each) with type bits 0x40000000/0x30000000; a title gets nothing above 1 TiB and the low ranges are taken, then the game faults on a reserved-but-inaccessible page (rva 0x125efda). Needs an address remap or an Azimuth-style layout (FINDINGS 6) in the PS5 memory backend
+- [ ] CMakeLists.txt PS5 branch (today the PS5 build is the shell target above)
 
 ### Step 7: PS5 launcher (after M2)
 - [ ] Native launcher (Dear ImGui on PS5_Vulkan unless something is clearly better), DualSense only
@@ -154,7 +156,7 @@ The PS5 binary statically links PS5_Vulkan's RADV build and link recipe, and the
 - [ ] Original launcher art and home-screen icon
 
 ### Milestones
-- [ ] M1: launches, loads the exe, resolves imports, logs to a file I can pull (mine to check)
+- [x] M1: launches, loads the exe, resolves imports, logs to a file I can pull (2026-10-30: `tools/ps5/build.sh runtime` + `run_title.sh`; exe mapped at 0x140000000 from /data/OpenHorizon2, imports 644/648 as on Linux, log pulled from the title's logs folder, jumped to the entry point)
 - [ ] M2: first frame on screen (TEST CARD)
 - [ ] M3: launcher on screen, finds the dump, Play starts the game (TEST CARD)
 - [ ] M4: menus with the DualSense (TEST CARD)

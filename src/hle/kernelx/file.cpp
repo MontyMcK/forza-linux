@@ -14,7 +14,6 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <filesystem>
-#include <fnmatch.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
@@ -31,6 +30,28 @@
 
 namespace fl::kx {
 namespace {
+
+// FindFirstFile patterns: '*' any run, '?' any one character, case-insensitive
+// (Windows has no [...] classes; fnmatch isn't available to a PS5 title).
+bool wildcard_match(const char* p, const char* s) {
+    const char *star = nullptr, *resume = nullptr;
+    while (*s) {
+        if (*p == '?' || (*p && *p != '*' && tolower(static_cast<unsigned char>(*p)) == tolower(static_cast<unsigned char>(*s)))) {
+            p++;
+            s++;
+        } else if (*p == '*') {
+            star = p++;
+            resume = s;
+        } else if (star) {
+            p = star + 1;
+            s = ++resume;
+        } else {
+            return false;
+        }
+    }
+    while (*p == '*') p++;
+    return !*p;
+}
 
 constexpr DWORD GENERIC_READ = 0x80000000;
 constexpr DWORD GENERIC_WRITE = 0x40000000;
@@ -485,7 +506,7 @@ WINAPI HANDLE kx_FindFirstFileExA(LPCSTR pattern, int level, Win32FindDataA* out
     ff->dir = vfs::to_host(dir_win);
     if (DIR* d = opendir(ff->dir.c_str())) {
         while (dirent* e = readdir(d))
-            if (fnmatch(glob.c_str(), e->d_name, FNM_CASEFOLD) == 0) ff->names.push_back(e->d_name);
+            if (wildcard_match(glob.c_str(), e->d_name)) ff->names.push_back(e->d_name);
         closedir(d);
     }
     FL_LOG(file, "FindFirstFile '%s' -> %s: %zu matches", pattern, ff->dir.c_str(), ff->names.size());

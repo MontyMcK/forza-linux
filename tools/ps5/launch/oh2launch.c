@@ -23,6 +23,9 @@
 #endif
 #define LOG_PATH "/data/homebrew/" OH2_TITLE_ID "/logs/launch.txt"
 #define ALREADY_RUNNING 0x8094000cu
+/* The title's arguments, one per line (e.g. --game-dir <dump>), uploaded by
+ * tools/ps5/run_title.sh; none if the file is missing. */
+#define ARGS_PATH "/data/homebrew/" OH2_TITLE_ID "/launch-args.txt"
 
 typedef struct {
   uint32_t size;
@@ -56,6 +59,24 @@ static void say(const char *fmt, ...) {
   line[n++] = '\n';
   write(log_fd, line, n);
   fsync(log_fd);
+}
+
+static char args_buf[4096];
+static const char *args[33];
+
+static const char **read_args(void) {
+  int fd = open(ARGS_PATH, O_RDONLY);
+  if (fd < 0) return 0;
+  ssize_t n = read(fd, args_buf, sizeof args_buf - 1);
+  close(fd);
+  if (n <= 0) return 0;
+  args_buf[n] = 0;
+  int k = 0;
+  for (char *line = strtok(args_buf, "\n"); line && k < 32; line = strtok(0, "\n"))
+    if (line[0]) args[k++] = line;
+  args[k] = 0;
+  say("arguments: %d from " ARGS_PATH, k);
+  return args;
 }
 
 int main(void) {
@@ -94,13 +115,14 @@ int main(void) {
       {"sceLncUtilLaunchApp/login", sceLncUtilLaunchApp, login},
       {"sceSystemServiceLaunchApp/login", sceSystemServiceLaunchApp, login},
   };
+  const char **argv = read_args();
   for (unsigned i = 0; i < sizeof tries / sizeof *tries; i++) {
     if (tries[i].user < 0) continue;
     launch_param_t p;
     memset(&p, 0, sizeof p);
     p.size = sizeof p;
     p.user_id = tries[i].user;
-    uint32_t r = (uint32_t)tries[i].call(OH2_TITLE_ID, 0, &p);
+    uint32_t r = (uint32_t)tries[i].call(OH2_TITLE_ID, argv, &p);
     say("launch " OH2_TITLE_ID " via %s user 0x%x -> 0x%08x", tries[i].name, tries[i].user, r);
     if (r == 0 || r == ALREADY_RUNNING) return 0;
   }

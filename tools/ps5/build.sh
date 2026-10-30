@@ -5,6 +5,7 @@
 #   tools/ps5/build.sh probe-title  the probe as the title's eboot, packaged (needs tools/ps5/setup_deps.sh)
 #   tools/ps5/build.sh launch    payloads that start the title / report what runs (build-ps5/launch/)
 #   tools/ps5/build.sh os-test-title  tests/os_test.cpp on the PS5 backend, as the title's eboot
+#   tools/ps5/build.sh runtime   forza-linux for the PS5, as the title's eboot
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 target=${1:-probe}
@@ -45,6 +46,35 @@ case $target in
       objs+=("$obj")
     done
     "$ps5_root/tools/ps5/link_title.sh" "$out/eboot.bin" "${objs[@]}"
+    "$ps5_root/tools/ps5/package.sh" "$out/eboot.bin" ;;
+  runtime)
+    # forza-linux for the PS5 as the title's eboot (PS5_PORT.md Step 6, M1).
+    # Our code: tools/ps5/cc-win.sh (Windows-ABI capable); zlib and addrlib:
+    # the PS5 target. Every runtime object is linked (HLE exports register
+    # through static constructors).
+    out="$ps5_root/build-ps5/runtime"
+    mkdir -p "$out/obj" "$out/zlib" "$out/addrlib"
+    sdkbin="$ps5_root/build-ps5/deps/PS5_Vulkan/.deps/native/ps5-payload-sdk/bin"
+    zsrc=$(ls -d "$ps5_root"/build-ps5/deps/PS5_Vulkan/.deps/native/zlib/zlib-*/ | head -1)
+    jobs=$(nproc)
+    export ps5_root zsrc out
+    printf '%s\n' adler32 compress crc32 deflate gzclose gzlib gzread gzwrite infback inffast inflate inftrees trees uncompr zutil |
+      xargs -P "$jobs" -I{} "$ps5_root/tools/ps5/cc.sh" -std=c11 -O2 -w -c "$zsrc/{}.c" -o "$out/zlib/{}.o"
+    rm -f "$out/libz.a" && "$sdkbin/llvm-ar" rcs "$out/libz.a" "$out"/zlib/*.o
+    a="$ps5_root/third_party/addrlib"
+    find "$a/src" -name '*.cpp' | xargs -P "$jobs" -I{} sh -c '"$ps5_root/tools/ps5/cc.sh" -std=c++20 -O2 -w -fexceptions \
+      -DADDR_FASTCALL= -DLITTLEENDIAN_CPU -DDEBUG=0 -DADDR_ALLOW_SIMD=1 -I"$0/inc" -I"$0/src" -I"$0/src/core" \
+      -I"$0/src/chip/r800" -I"$0/src/chip/gfx9" -I"$0/src/chip/gfx10" -I"$0/src/chip/gfx11" -I"$0/src/chip/gfx12" \
+      -c "$1" -o "$out/addrlib/$(basename "$1" .cpp).o"' "$a" {}
+    rm -f "$out/libaddrlib.a" && "$sdkbin/llvm-ar" rcs "$out/libaddrlib.a" "$out"/addrlib/*.o
+    find "$ps5_root/src" \( -name '*.cpp' -o -name '*.S' \) -not -path '*/platform/os/linux/*' | sort > "$out/sources.txt"
+    xargs -P "$jobs" -I{} sh -c 'o="$out/obj/$(echo "$1" | sed "s|$ps5_root/src/||; s|/|_|g").o"
+      "$ps5_root/tools/ps5/cc-win.sh" -std=c++20 -O2 -g -Wall -Wextra -Wno-unused-parameter -fno-exceptions -fno-strict-aliasing \
+        -I"$ps5_root/src" -I"$ps5_root/third_party/addrlib/inc" -I"$zsrc" -c "$1" -o "$o"' _ {} < "$out/sources.txt"
+    # No PS5 DXVK yet: its entry points fail loudly (tools/ps5/m1/no_dxvk.cpp).
+    "$ps5_root/tools/ps5/cc-win.sh" -std=c++20 -O2 -fno-exceptions -I"$ps5_root/src" \
+      -c "$ps5_root/tools/ps5/m1/no_dxvk.cpp" -o "$out/no_dxvk.o"
+    "$ps5_root/tools/ps5/link_title.sh" "$out/eboot.bin" "$out"/obj/*.o "$out/no_dxvk.o" "$out/libaddrlib.a" "$out/libz.a"
     "$ps5_root/tools/ps5/package.sh" "$out/eboot.bin" ;;
   launch)
     out="$ps5_root/build-ps5/launch"

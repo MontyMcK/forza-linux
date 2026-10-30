@@ -398,3 +398,12 @@ Next: Monty's storage decision; RADV release build once the Mesa host packages a
 - ms_abi on the PS5: compile the runtime with `-target x86_64-unknown-freebsd9` + `-fshort-wchar -D__PROSPERO__=1 -D__SCE__=1` + the PS5 flags against the SDK sysroot (FINDINGS 7.6); a test object links into a title.
 
 Next: make cmake/ps5.cmake build the runtime that way (host clang, freebsd9 target, SDK sysroot + libc++ headers, the flags in FINDINGS 7.6), add a PS5 branch to CMakeLists.txt (FL_OS=ps5: no SDL/pkg-config, DXVK/FFmpeg/zlib for the PS5 later, link with tools/ps5/link_title.sh), and get forza-linux to compile; then M1 (load the exe from /data/OpenHorizon2 via --game-dir, resolve imports, log over netlog).
+
+## 2026-10-30 (late night): Claude: M1 on the console
+
+- RADV release archive built (build-ps5/deps/PS5_Vulkan/.deps/native/radv-release, Mesa 1ba9874) after Monty installed the Mesa host packages (+ spirv-tools-devel).
+- The runtime compiles for the PS5 with tools/ps5/cc-win.sh (FINDINGS 7.6) and links into the title (`build.sh runtime`); `run_title.sh` starts it with `--game-dir $PS5_DUMP_REMOTE` and `--env FL_LOG_FILE=...` (new `--env` option in main.cpp, harmless on Linux).
+- **M1 done** (FINDINGS 7.7): exe loaded from /data/OpenHorizon2, imports resolved, log pulled over FTP. The game then needs its fixed-address title memory (0x60000000000 etc.), which a title can't reserve, and faults.
+- Portability fixes along the way: FindFirstFile's own wildcard matcher (Linux check: same archives found), os::current_stack, os::random_bytes, qsort without qsort_r, no std::atomic_ref, bind_import, PS5 stand-ins for link/symlink/readlink/pathconf/timegm/strsignal.
+
+Next: Xbox title-memory addresses in the PS5 memory backend (remap the fixed reservations into ranges a title can reserve, e.g. 0x1000000000 upward, and teach VirtualAlloc to place them; check with the decomp how the game uses those addresses (FINDINGS 6, Azimuth's layout)); then DXVK static with a VK_KHR_display WSI on RADV for M2.
