@@ -70,7 +70,7 @@ Add a line whenever a decision is made: `- YYYY-MM-DD: decision, reason`.
 - 2026-10-24: xg_x is reimplemented on AMD addrlib (vendored from Mesa, MIT) configured with the console's tile tables. Reason: assets are pre-tiled, so layouts must match the console's XG byte for byte; addrlib is what XG itself is built on.
 - 2026-10-25: Azimuth (a proprietary Windows launcher that runs this game on D3D12) is studied as a behaviour reference under Rule 1, like the Microsoft DLLs: facts only, no code. Reason: the user asked for it, and it documents (via its strings and RTTI) exactly the subsystems we're blocked on.
 - 2026-10-24: Package DLLs (Microsoft.Xbox.Services/GameChat/Input.Wheel from Mount/) are loaded and run, not reimplemented. Reason: they're the game's own dependencies and need only runtime imports we implement anyway; Xbox Live then runs offline.
-- (open) Project license. LGPL-2.1+ makes it easy to borrow Wine code (unwinder, CRT bits). The repo has been public (github.com/MontyMcK/open-horizon-2, named forza-linux until 2026-10-27) since 2026-10-25 with no LICENSE file, i.e. all rights reserved by default: ask the user which one they want.
+- 2026-10-30: Project license: **GPL-3.0-or-later** (LICENSE, README). Monty chose GPL-3 so builds that link GPL-3.0-or-later code (the PS5 port's driver and SDK) can be shared. Code we take in must be GPL-3-compatible (MIT, zlib, BSD, LGPL-2.1+, GPL-3.0+; not GPL-2.0-only). Before this the repo (public since 2026-10-25) had no license.
 
 ---
 

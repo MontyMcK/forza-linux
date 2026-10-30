@@ -28,6 +28,7 @@ The game dump is not ours to distribute. **No game data may ever be committed.**
 - The Microsoft DLLs in `game_data/.../EmbeddedXvd/Windows/System32/` (kernelx.dll, d3d11_x.dll, combase.dll, msvcr110.dll…) may be **read and disassembled as reference** to learn behavior. They must **never be loaded, linked or shipped** by our runtime.
 - Azimuth (`azimuth-windows.zip`, unpacked in `research/private/azimuth/`) is proprietary: treat it exactly like the Microsoft DLLs. Read, disassemble and decompile it to learn **how** it handles the game (protocols, layouts, semantics), write the facts in FINDINGS.md with the Azimuth function/string as evidence, and implement them ourselves. Never copy its code, shaders or pipeline cache, and never load, link or ship it. Decompiler output stays in `research/private/`.
 - Wine is LGPL-2.1+. Reading it for reference is fine. If you copy code from it, keep that code in its own files under its original license header, and note it in LOG.md.
+- The project is **GPL-3.0-or-later** (LICENSE). Anything copied in must be GPL-3-compatible (MIT, zlib, BSD, LGPL-2.1+, GPL-3.0+); never GPL-2.0-only code (e.g. RPCS3).
 
 ## Rule 2: keep the trail for the next agent
 

@@ -347,3 +347,7 @@ Next: check the cost of the full 4-sample resolve (FL_LOG=fps) and other users o
 - Seen at the same moment, not fixed: `D3DMapEsramMemory: mprotect(..., 53 pages) failed` (twice per thumbnail render, two threads); the thumbnail is still correct. Check errno/alignment there next.
 - Still unimplemented imports (FL_LOG=missing): vccorlib `Platform::Details::CreateValue`, MFPlat `MFCreateMediaType` / `MFInitMediaTypeFromWaveFormatEx`, MFReadWrite `MFCreateSourceReaderFromURL`.
 - Also this evening: Monty's save edited to 999,999,999 CR (credits are a 32-bit int in ProfileData: entry `[u32 len][name][0x20][u32 0][u32 type 3][i32]`, "ssmc" header = magic + payload length, no checksum); backup in ~/.local/share/forza-linux-backups/.
+
+## 2026-10-30: Claude: the project is GPL-3.0-or-later
+
+- Monty: "give the project a GPL-3 licence". LICENSE (the GNU GPL v3 text), a README "License" section (or-later notice, third-party licenses, the game not covered), the PLAN decision and a CLAUDE.md Rule 1 note (copy only GPL-3-compatible code). Same change as on the ps5-test branch.
