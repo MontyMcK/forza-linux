@@ -381,3 +381,5 @@ Next: unchanged (Step 4 memory area; Step 3b title probe).
 - Started: PS5_Vulkan's RADV release build (build-ps5/radv-release.log; mako/markupsafe in build-ps5/deps/pymods via PS5VK_MAKO_PATH).
 
 Next: after Monty's restart, check SM+ registered PPSA99642 (/data/shadowmount/debug.log), then `tools/ps5/send_payload.sh build-ps5/launch/oh2launch.elf` and pull `probe-title.txt` (logs folder or /download0) for Step 3b. Then Step 5: cmake/ps5.cmake, static DXVK with a VK_KHR_display WSI, FFmpeg XMA, addrlib; Step 6: the PS5 backend of src/platform/os/ (must pass os_test on the console).
+- RADV release build (`PYTHONPATH=build-ps5/deps/pymods PS5VK_MAKO_PATH=build-ps5/deps/pymods bash tools/build-radv.sh release` in build-ps5/deps/PS5_Vulkan) stops at Mesa's host CLC step: "Dependency LLVMSPIRVLib not found". Needs (sudo, asked Monty): `sudo dnf install spirv-llvm-translator-devel libclc-devel spirv-headers-devel python3-ply clang-devel`. Then rerun the same command (log: build-ps5/radv-release.log).
+- `cmake/ps5.cmake` added (wraps the SDK fork's prospero.cmake, znver2, no host pkg-config, FL_OS=ps5).
