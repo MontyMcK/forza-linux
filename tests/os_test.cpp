@@ -10,6 +10,7 @@
 #include "platform/os/files.h"
 #include "platform/os/futex.h"
 #include "platform/os/memory.h"
+#include "platform/os/signal_context.h"
 #include "platform/os/thread.h"
 
 #include <csignal>
@@ -127,6 +128,23 @@ int main() {
     t2.join();
     check(other_tid != os::thread_id() && os::process_id() != 0, "thread ids differ between threads");
     check(sent && got_signal, "signal_thread delivers to that thread");
+
+    // Signal context: read rax and xmm0 of the interrupted code, change rax.
+    static uint64_t seen_rax, seen_xmm0;
+    struct sigaction tr = {};
+    tr.sa_flags = SA_SIGINFO;
+    tr.sa_sigaction = [](int, siginfo_t*, void* uc) {
+        os::Regs g(uc);
+        seen_rax = g[os::kRax];
+        std::memcpy(&seen_xmm0, os::fxsave_area(uc) + 160, 8);
+        g[os::kRax] = 0x55;
+    };
+    sigaction(SIGTRAP, &tr, nullptr);
+    uint64_t after;
+    __asm__ volatile("movabs $0x1234567890abcdef, %%rax\n\tmovq %%rax, %%xmm0\n\tint3\n\tmovq %%rax, %0"
+                     : "=r"(after) : : "rax", "xmm0");
+    check(seen_rax == 0x1234567890abcdefull && seen_xmm0 == 0x1234567890abcdefull && after == 0x55,
+          "signal context: read rax and xmm0, write rax");
 
     std::printf("%s\n", failures ? "FAILED" : "all passed");
     return failures ? 1 : 0;

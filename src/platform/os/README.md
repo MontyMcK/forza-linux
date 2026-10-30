@@ -12,7 +12,7 @@ call the OS directly for anything listed below.
 | Memory: reserve, commit, protect, exec, page size | memory.h | mmap / mprotect | ReserveVirtualRange, direct memory, sceKernelMprotect | yes |
 | Thread environment: GS (TEB), game-thread CPU state, thread ids, signal a thread | thread.h | `arch_prctl(ARCH_SET_GS)`, `gettid`, `tgkill` | `sysarch(AMD64_SET_GSBASE)`, MXCSR 0x1f80, `thr_self`, `thr_kill` | yes |
 | Checked copies (never fault) | memory.h | `process_vm_readv/writev` on ourselves | a fault-guarded copy (no process_vm_*) | yes |
-| Signal context access | | `ucontext_t` / `REG_*` | mcontext at +64, FXSAVE at +320 | no |
+| Signal context access | signal_context.h | `ucontext_t` gregs / fpregs | mcontext at +64 (rip +224), FXSAVE at +320 | yes |
 | Window / present | | SDL3 | VK_KHR_display on VideoOut | no |
 | Input | | SDL3 gamepad | ScePad | no |
 | Controller output (rumble, triggers) | | SDL3 | ScePad | no |
