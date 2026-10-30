@@ -133,7 +133,7 @@ The PS5 binary statically links PS5_Vulkan's RADV build and link recipe, and the
 - Step 4 complete (2026-10-30): no SDL, `/proc`, `<linux/…>`, raw `syscall()` or `ucontext` layout outside `src/platform/os/linux/`; `tests/os_test.cpp` (24 checks) is the contract a PS5 backend must pass
 
 ### Step 5: toolchain and packaging
-- [ ] `cmake/ps5.cmake` toolchain
+- [x] `cmake/ps5.cmake` toolchain (wraps the SDK fork's `prospero.cmake`, znver2, no host pkg-config, `FL_OS=ps5`); CMakeLists.txt still has to learn the PS5 link (link_title.sh) and static deps
 - [ ] Static PS5_Vulkan (RADV release archive), DXVK (+ patches, VK_KHR_display WSI), FFmpeg XMA, addrlib
 - [x] `tools/check_no_game_data.sh --package DIR` audit (name+size vs a live game_data listing, byte compare on size matches, game types and Rule 0 names, 200 MiB cap, magics)
 - [x] `tools/ps5/package.sh`: audit first, then title folder + release zip (2026-10-30; title identity and original icon in `ps5/title/sce_sys/`)
