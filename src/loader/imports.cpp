@@ -4,7 +4,6 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
-#include <sys/mman.h>
 #include <unordered_map>
 
 #include "common/log.h"
@@ -12,6 +11,7 @@
 #include "hle/registry.h"
 #include "loader/crash.h"
 #include "loader/pe_structs.h"
+#include "platform/os/memory.h"
 
 extern "C" void fl_trace_entry();
 
@@ -30,9 +30,10 @@ constexpr size_t kArenaSize = 1 << 20;
 
 uint8_t* alloc_thunk(size_t n) {
     if (!g_arena) {
-        g_arena = static_cast<uint8_t*>(
-            mmap(nullptr, kArenaSize, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
-        if (g_arena == MAP_FAILED) fatal("thunk arena mmap failed");
+        // Writable first, then executable: the PS5 refuses execute at map time.
+        g_arena = static_cast<uint8_t*>(os::map_anon(nullptr, kArenaSize, os::kRead | os::kWrite));
+        if (!g_arena || !os::protect(g_arena, kArenaSize, os::kRead | os::kWrite | os::kExec))
+            fatal("thunk arena mmap failed");
     }
     if (g_arena_used + n > kArenaSize) fatal("thunk arena exhausted");
     uint8_t* p = g_arena + g_arena_used;

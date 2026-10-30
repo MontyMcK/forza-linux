@@ -9,7 +9,6 @@
 #include <cstring>
 #include <ctime>
 #include <string>
-#include <sys/mman.h>
 
 #include "common/log.h"
 #include "hle/d3d11x/trace.h"
@@ -18,6 +17,7 @@
 #include "hle/d3d11x/gpumem.h"
 #include "hle/registry.h"
 #include "hle/xg/xg.h"
+#include "platform/os/memory.h"
 
 #include <map>
 #include <mutex>
@@ -187,7 +187,7 @@ WINAPI HRESULT dev_CreatePlacementTexture3D(Iface* self, const uint32_t* xd, UIN
 WINAPI HRESULT D3DMapEsramMemory_(UINT flags, void* addr, UINT pages, const UINT* page_list) {
     constexpr size_t kEsramPage = 0x10000;
     FL_LOG(d3d, "D3DMapEsramMemory(flags 0x%x, %p, %u pages, first %u)", flags, addr, pages, page_list ? page_list[0] : 0);
-    if (mprotect(addr, size_t(pages) * kEsramPage, PROT_READ | PROT_WRITE) != 0) {
+    if (!os::commit(addr, size_t(pages) * kEsramPage, os::kRead | os::kWrite)) {
         FL_ERROR("d3d: D3DMapEsramMemory: mprotect(%p, %u pages) failed", addr, pages);
         return E_INVALIDARG;
     }

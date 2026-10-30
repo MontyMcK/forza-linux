@@ -6,7 +6,6 @@
 #include <ctime>
 #include <mutex>
 #include <pthread.h>
-#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <unordered_map>
@@ -16,6 +15,7 @@
 #include "hle/kernelx/kobject.h"
 #include "hle/registry.h"
 #include "loader/thread_env.h"
+#include "platform/os/memory.h"
 
 extern "C" void fl_fiber_switch(uint64_t* save_rsp, uint64_t new_rsp);
 extern "C" void fl_fiber_entry();
@@ -338,11 +338,10 @@ WINAPI BOOL kx_ConvertFiberToThread() {
 
 WINAPI void* kx_CreateFiber(SIZE_T stack, FiberStart start, void* param) {
     size_t size = (std::max<size_t>(stack ? stack : (1u << 20), 64u << 10) + 0xFFFF) & ~size_t(0xFFFF);
-    size_t guard = 4096;
-    auto* mem = static_cast<uint8_t*>(
-        mmap(nullptr, size + guard, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0));
-    if (mem == MAP_FAILED) return set_last_error(ERROR_NOT_ENOUGH_MEMORY), nullptr;
-    mprotect(mem, guard, PROT_NONE);
+    size_t guard = os::page_size();
+    auto* mem = static_cast<uint8_t*>(os::map_anon(nullptr, size + guard, os::kRead | os::kWrite));
+    if (!mem) return set_last_error(ERROR_NOT_ENOUGH_MEMORY), nullptr;
+    os::protect(mem, guard, os::kNone);
 
     auto* f = new Fiber{param};
     f->mem = mem;
@@ -384,7 +383,7 @@ WINAPI void kx_SwitchToFiber(void* target) {
 WINAPI void kx_DeleteFiber(void* fiber) {
     auto* f = static_cast<Fiber*>(fiber);
     if (f == current_fiber()) fl::fatal("DeleteFiber on the running fiber (would exit thread): not supported");
-    if (f->mem) munmap(f->mem, f->mem_size);
+    if (f->mem) os::release(f->mem, f->mem_size);
     delete f;
 }
 

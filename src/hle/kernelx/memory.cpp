@@ -8,12 +8,12 @@
 #include <malloc.h>
 #include <map>
 #include <mutex>
-#include <sys/mman.h>
 
 #include "common/log.h"
 #include "hle/d3d11x/gpumem.h"
 #include "hle/kernelx/kobject.h"
 #include "hle/registry.h"
+#include "platform/os/memory.h"
 
 namespace fl::kx {
 namespace {
@@ -26,16 +26,18 @@ constexpr DWORD MEM_TOP_DOWN = 0x100000;
 constexpr DWORD MEM_LARGE_PAGES = 0x20000000;
 constexpr DWORD kKnownTypeBits = MEM_COMMIT | MEM_RESERVE | MEM_TOP_DOWN | MEM_LARGE_PAGES;
 
-int to_prot(DWORD protect) {
+unsigned to_prot(DWORD protect) {
     switch (protect & 0xFF) {
-        case 0x01: return PROT_NONE;                          // PAGE_NOACCESS
-        case 0x02: return PROT_READ;                          // PAGE_READONLY
-        case 0x04: case 0x08: return PROT_READ | PROT_WRITE;  // READWRITE / WRITECOPY
-        case 0x10: case 0x20: return PROT_READ | PROT_EXEC;
-        case 0x40: case 0x80: return PROT_READ | PROT_WRITE | PROT_EXEC;
-        default: return PROT_READ | PROT_WRITE;
+        case 0x01: return os::kNone;                          // PAGE_NOACCESS
+        case 0x02: return os::kRead;                          // PAGE_READONLY
+        case 0x04: case 0x08: return os::kRead | os::kWrite;  // READWRITE / WRITECOPY
+        case 0x10: case 0x20: return os::kRead | os::kExec;
+        case 0x40: case 0x80: return os::kRead | os::kWrite | os::kExec;
+        default: return os::kRead | os::kWrite;
     }
 }
+
+SIZE_T page_round(SIZE_T n) { return (n + os::page_size() - 1) & ~SIZE_T(os::page_size() - 1); }
 
 // Reservations: base -> size (needed for MEM_RELEASE, which passes size 0).
 std::mutex g_vm_mutex;
@@ -45,37 +47,30 @@ WINAPI void* kx_VirtualAlloc(void* addr, SIZE_T size, DWORD type, DWORD protect)
     if (type & ~kKnownTypeBits)
         FL_LOG(memory, "VirtualAlloc: unknown type bits 0x%x (Xbox-specific?)", type & ~kKnownTypeBits);
     if (protect & ~0xFFu) FL_LOG(memory, "VirtualAlloc: extra protect bits 0x%x (Xbox-specific?)", protect & ~0xFFu);
-    size = (size + 0xFFF) & ~SIZE_T(0xFFF);
-    int prot = (type & MEM_COMMIT) ? to_prot(protect) : PROT_NONE;
+    size = page_round(size);
+    unsigned prot = (type & MEM_COMMIT) ? to_prot(protect) : os::kNone;
     std::lock_guard lock(g_vm_mutex);
 
     if (addr && !(type & MEM_RESERVE)) {
         // Commit inside an existing reservation.
-        auto base = reinterpret_cast<uint64_t>(addr) & ~uint64_t(0xFFF);
+        auto base = reinterpret_cast<uint64_t>(addr) & ~uint64_t(os::page_size() - 1);
         FL_LOG(memory, "VirtualAlloc commit %p+0x%llx type 0x%x prot 0x%x", addr, (unsigned long long)size, type, protect);
-        if (mprotect(reinterpret_cast<void*>(base), size, prot) != 0) {
+        if (!os::commit(reinterpret_cast<void*>(base), size, prot)) {
             set_last_error(ERROR_INVALID_PARAMETER);
             return nullptr;
         }
         return addr;
     }
 
-    // Large allocations: align to 64 KB like Windows' allocation granularity.
-    size_t align = 0x10000;
-    void* want = addr;
-    void* p = mmap(want, size + align, prot, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | (want ? MAP_FIXED_NOREPLACE : 0),
-                   -1, 0);
-    if (p == MAP_FAILED) {
+    // Align to 64 KB like Windows' allocation granularity.
+    void* p = os::map_anon(addr, size, prot, 0x10000);
+    if (!p) {
         FL_ERROR("VirtualAlloc(%p, 0x%llx, 0x%x, 0x%x) failed: %s", addr, (unsigned long long)size, type, protect,
                  strerror(errno));
         set_last_error(ERROR_NOT_ENOUGH_MEMORY);
         return nullptr;
     }
-    auto raw = reinterpret_cast<uint64_t>(p);
-    uint64_t aligned = want ? raw : (raw + align - 1) & ~(uint64_t(align) - 1);
-    if (aligned > raw) munmap(p, aligned - raw);
-    uint64_t end = raw + size + align;
-    if (end > aligned + size) munmap(reinterpret_cast<void*>(aligned + size), end - (aligned + size));
+    auto aligned = reinterpret_cast<uint64_t>(p);
     g_regions[aligned] = size;
     FL_LOG(memory, "VirtualAlloc 0x%llx bytes type 0x%x prot 0x%x -> 0x%llx", (unsigned long long)size, type, protect,
            (unsigned long long)aligned);
@@ -90,16 +85,16 @@ WINAPI BOOL kx_VirtualFree(void* addr, SIZE_T size, DWORD type) {
         if (it == g_regions.end()) return set_last_error(ERROR_INVALID_PARAMETER), FALSE_;
         FL_LOG(memory, "VirtualFree release %p+0x%llx", addr, (unsigned long long)it->second);
         auto guard = d3d::gpumem::unmap_guard();  // not while an upload reads it
-        munmap(addr, it->second);
+        os::release(addr, it->second);
         d3d::gpumem::notify_remap(addr, it->second);
         g_regions.erase(it);
         return TRUE_;
     }
     if (type & MEM_DECOMMIT) {
-        size = (size + 0xFFF) & ~SIZE_T(0xFFF);
+        size = page_round(size);
         FL_LOG(memory, "VirtualFree decommit %p+0x%llx", addr, (unsigned long long)size);
         auto guard = d3d::gpumem::unmap_guard();  // not while an upload reads it
-        mmap(addr, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_NORESERVE, -1, 0);
+        os::decommit(addr, size);
         d3d::gpumem::notify_remap(addr, size);  // the fresh pages lost their write tracking
         return TRUE_;
     }
@@ -146,25 +141,20 @@ std::mutex g_xmem_mutex;
 std::map<uintptr_t, size_t> g_xmem;  // base -> mapped length
 
 WINAPI void* kx_XMemAllocDefault(SIZE_T size, uint64_t attributes) {
-    constexpr size_t kPage = 0x1000;
-    size_t align = size >= 0x10000 ? 0x10000 : kPage;
-    size_t len = ((size ? size : 1) + kPage - 1) & ~(kPage - 1);
-    size_t span = len + (align > kPage ? align : 0);
-    auto* raw = static_cast<uint8_t*>(mmap(nullptr, span, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
-    if (raw == MAP_FAILED) {
+    size_t len = page_round(size ? size : 1);
+    void* p = os::map_anon(nullptr, len, os::kRead | os::kWrite, size >= 0x10000 ? 0x10000 : 0);
+    if (!p) {
         FL_ERROR("XMemAllocDefault(0x%llx): mmap failed", (unsigned long long)size);
         return nullptr;
     }
-    auto base = (reinterpret_cast<uintptr_t>(raw) + align - 1) & ~(align - 1);
-    if (size_t head = base - reinterpret_cast<uintptr_t>(raw)) munmap(raw, head);
-    if (size_t tail = reinterpret_cast<uintptr_t>(raw) + span - (base + len)) munmap(reinterpret_cast<void*>(base + len), tail);
+    auto base = reinterpret_cast<uintptr_t>(p);
     {
         std::lock_guard lock(g_xmem_mutex);
         g_xmem[base] = len;
     }
     FL_LOG(memory, "XMemAllocDefault(0x%llx, attr 0x%llx) -> %p", (unsigned long long)size,
            (unsigned long long)attributes, reinterpret_cast<void*>(base));
-    return reinterpret_cast<void*>(base);  // mmap memory is already zero
+    return reinterpret_cast<void*>(base);  // map_anon memory is already zero
 }
 
 WINAPI void kx_XMemFreeDefault(void* p, uint64_t attributes) {
@@ -181,7 +171,7 @@ WINAPI void kx_XMemFreeDefault(void* p, uint64_t attributes) {
         g_xmem.erase(it);
     }
     auto guard = d3d::gpumem::unmap_guard();  // not while an upload reads it
-    munmap(p, len);
+    os::release(p, len);
 }
 
 WINAPI void* kx_XMemAlloc(SIZE_T size, uint64_t attributes) {
@@ -215,23 +205,13 @@ struct TitleMemoryStatusData {
 };
 static_assert(sizeof(TitleMemoryStatusData) == 0x40);
 
-uint64_t resident_bytes() {
-    FILE* f = fopen("/proc/self/statm", "r");
-    unsigned long long pages = 0, rss = 0;
-    if (f) {
-        if (fscanf(f, "%llu %llu", &pages, &rss) != 2) rss = 0;
-        fclose(f);
-    }
-    return rss * 4096;
-}
-
 WINAPI BOOL kx_TitleMemoryStatus(TitleMemoryStatusData* s) {
     if (s->length != sizeof(*s)) {
         set_last_error(87 /* ERROR_INVALID_PARAMETER */);
         return FALSE_;
     }
     constexpr uint64_t kTitleBudget = 5ull << 30;
-    uint64_t used = std::min<uint64_t>(resident_bytes(), kTitleBudget - (256ull << 20));
+    uint64_t used = std::min<uint64_t>(os::resident_bytes(), kTitleBudget - (256ull << 20));
     s->total = kTitleBudget;
     s->available = kTitleBudget - used;
     s->used_a = 0;

@@ -19,7 +19,6 @@
 #include <map>
 #include <mutex>
 #include <string>
-#include <sys/mman.h>
 #include <vector>
 
 #include "common/log.h"
@@ -29,6 +28,7 @@
 #include "hle/winrt/com.h"
 #include "loader/imports.h"
 #include "loader/pe_image.h"
+#include "platform/os/memory.h"
 
 extern "C" void fl_cxx_throw_impl(void* obj, void* throw_info, uint64_t, uint64_t, fl::seh::Context* ctx);
 
@@ -170,11 +170,10 @@ uint32_t meta_alloc(size_t n) {
         m.base = img.base;
         size_t size = 0x10000;
         uintptr_t want = (reinterpret_cast<uintptr_t>(img.base) + img.size + 0xffff) & ~uintptr_t(0xffff);
-        void* p = MAP_FAILED;
-        for (int i = 0; i < 64 && p == MAP_FAILED; i++, want += 0x10000)
-            p = mmap(reinterpret_cast<void*>(want), size, PROT_READ | PROT_WRITE,
-                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
-        if (p == MAP_FAILED) fatal("vccorlib: no room for EH metadata after the game image");
+        void* p = nullptr;
+        for (int i = 0; i < 64 && !p; i++, want += 0x10000)
+            p = os::map_anon(reinterpret_cast<void*>(want), size, os::kRead | os::kWrite);
+        if (!p) fatal("vccorlib: no room for EH metadata after the game image");
         m.next = static_cast<uint8_t*>(p);
         m.end = m.next + size;
     }

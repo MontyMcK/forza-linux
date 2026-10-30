@@ -9,7 +9,7 @@ call the OS directly for anything listed below.
 | --- | --- | --- | --- | --- |
 | Futex wait/wake | futex.h | `SYS_futex` (private) | `_umtx_op` WAIT_UINT_PRIVATE / WAKE_PRIVATE | yes |
 | File existence | files.h | `stat` | `stat` (never `access`: EPERM in a title) | yes |
-| Memory: reserve, commit, protect, exec, page size | | mmap / mprotect | ReserveVirtualRange, direct memory, sceKernelMprotect | no |
+| Memory: reserve, commit, protect, exec, page size | memory.h | mmap / mprotect | ReserveVirtualRange, direct memory, sceKernelMprotect | yes |
 | Thread environment (GS = TEB) | | `arch_prctl(ARCH_SET_GS)` | `sysarch(AMD64_SET_GSBASE)` | no |
 | Signal context access | | `ucontext_t` / `REG_*` | mcontext at +64, FXSAVE at +320 | no |
 | Window / present | | SDL3 | VK_KHR_display on VideoOut | no |

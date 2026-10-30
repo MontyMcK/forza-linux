@@ -15,7 +15,6 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
-#include <sys/mman.h>
 #include <ucontext.h>
 #include <unistd.h>
 #include <vector>
@@ -25,6 +24,7 @@
 #include "loader/pe_image.h"
 #include "hle/seh/seh.h"
 #include "loader/thread_env.h"
+#include "platform/os/memory.h"
 
 namespace fl::loader {
 namespace {
@@ -105,7 +105,8 @@ thread_local bool t_watch_step = false;
 
 bool watch_fault(uint64_t fault, greg_t* g) {
     uint64_t w = g_watch_addr.load();
-    if (!w || (fault & ~uint64_t(0xfff)) != (w & ~uint64_t(0xfff))) return false;
+    const uint64_t pm = os::page_size() - 1;
+    if (!w || (fault & ~pm) != (w & ~pm)) return false;
     if (fault <= w && w < fault + 16) {
         uint64_t base = reinterpret_cast<uint64_t>(main_image().base);
         uint64_t rip = g[REG_RIP];
@@ -115,7 +116,7 @@ bool watch_fault(uint64_t fault, greg_t* g) {
                       (unsigned long long)(rip - (game ? base : 0)),
                       (unsigned long long)(*reinterpret_cast<uint64_t*>(g[REG_RSP]) - base));
     }
-    mprotect(reinterpret_cast<void*>(w & ~uint64_t(0xfff)), 0x1000, PROT_READ | PROT_WRITE);
+    os::protect(reinterpret_cast<void*>(w & ~uint64_t(os::page_size() - 1)), os::page_size(), os::kRead | os::kWrite);
     g[REG_EFL] |= 0x100;  // single-step the write, then re-protect (trap handler)
     t_watch_step = true;
     return true;
@@ -132,7 +133,7 @@ void handler(int sig, siginfo_t* si, void* uc_) {
     if (sig == SIGSEGV && g_fault_hook && g_fault_hook(fault, (g[REG_ERR] & 2) != 0)) return;
 
     for (auto& t : g_data_traps) {
-        if (fault >= reinterpret_cast<uint64_t>(t.page) && fault < reinterpret_cast<uint64_t>(t.page) + 4096) {
+        if (fault >= reinterpret_cast<uint64_t>(t.page) && fault < reinterpret_cast<uint64_t>(t.page) + os::page_size()) {
             char rip[96];
             describe(rip, sizeof rip, g[REG_RIP]);
             fl::log_write("FATAL", "UNIMPLEMENTED data import %s!%s (touched at rip %s)", t.dll.c_str(),
@@ -412,7 +413,8 @@ static void trap_handler(int, siginfo_t* si, void* uc_) {
     if (t_watch_step && si->si_code == TRAP_TRACE) {
         t_watch_step = false;
         g[REG_EFL] &= ~0x100;
-        if (uint64_t w = g_watch_addr.load()) mprotect(reinterpret_cast<void*>(w & ~uint64_t(0xfff)), 0x1000, PROT_READ);
+        if (uint64_t w = g_watch_addr.load())
+            os::protect(reinterpret_cast<void*>(w & ~uint64_t(os::page_size() - 1)), os::page_size(), os::kRead);
         return;
     }
     uint64_t at = g[REG_RIP] - 1;
@@ -422,7 +424,7 @@ static void trap_handler(int, siginfo_t* si, void* uc_) {
         fl::log_write("watch", "watching %llx (this %llx + 0x%llx)", (unsigned long long)w, (unsigned long long)g[REG_RCX],
                       (unsigned long long)g_watch_off);
         // Protect after the constructor has run: arm on the first write fault instead.
-        mprotect(reinterpret_cast<void*>(w & ~uint64_t(0xfff)), 0x1000, PROT_READ);
+        os::protect(reinterpret_cast<void*>(w & ~uint64_t(os::page_size() - 1)), os::page_size(), os::kRead);
     }
     size_t lo = 0, hi = g_breaks.size();
     while (lo < hi) {
@@ -653,8 +655,8 @@ void arm_breakpoints() {
     rvas.erase(std::unique(rvas.begin(), rvas.end()), rvas.end());
     // Make the code writable once (the loader maps it RX).
     uint64_t text_lo = base + rvas.front(), text_hi = base + rvas.back() + 1;
-    mprotect(reinterpret_cast<void*>(text_lo & ~uint64_t(0xfff)), ((text_hi + 0xfff) & ~uint64_t(0xfff)) - (text_lo & ~uint64_t(0xfff)),
-             PROT_READ | PROT_WRITE | PROT_EXEC);
+    const uint64_t pm = os::page_size() - 1;
+    os::protect(reinterpret_cast<void*>(text_lo & ~pm), ((text_hi + pm) & ~pm) - (text_lo & ~pm), os::kRead | os::kWrite | os::kExec);
     g_breaks.reserve(rvas.size());
     for (uint64_t rva : rvas) {
         uint64_t a = base + rva;
@@ -693,8 +695,8 @@ void set_fault_hook(bool (*hook)(uint64_t addr, bool write)) { g_fault_hook = ho
 
 void* make_data_trap(const std::string& dll, const std::string& name) {
     std::lock_guard lock(g_mutex);
-    void* p = mmap(nullptr, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (p == MAP_FAILED) fatal("mmap data trap failed");
+    void* p = os::map_anon(nullptr, os::page_size(), os::kNone);
+    if (!p) fatal("mmap data trap failed");
     g_data_traps.push_back({static_cast<uint8_t*>(p), dll, name});
     return p;
 }
