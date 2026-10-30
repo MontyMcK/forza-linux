@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Links PS5 objects and archives into a title eboot.bin (a fake SELF) with
-# PS5_Vulkan's recipe: its app CRT, lld with its PIE linker script, the payload
-# SDK's import stubs and libps5platform, then ps5-native-tool link + sign.
+# PS5_Vulkan's recipe: its app CRT, radv_link_recipe (below), the payload
+# SDK's import stubs, then ps5-native-tool link + sign.
 #   tools/ps5/link_title.sh OUT/eboot.bin INPUT.o|INPUT.a ...
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -21,10 +21,38 @@ cc="$root/tools/ps5/cc.sh"
   -c "$native/app_crt.cpp" -o "$work/app_crt.o"
 "$cc" -std=c++20 -O2 -Wall -Wextra -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections \
   -c "$native/app_cpp_runtime.cpp" -o "$work/app_cpp_runtime.o"
-"$sdk/bin/prospero-lld" -T "$native/ps5-pie.ld" --eh-frame-hdr \
+# PS5_Vulkan's link recipe (tools/radv-link.sh, as rpcs3-PS5 uses it): its
+# unwind-aware linker script, libc++/libc++abi/libunwind, clang's builtins
+# (emulated TLS), and the platform layer's wraps: malloc and friends go to its
+# heap in direct memory (libc's stops at 13 MiB in a title), threads get 2 MiB
+# stacks, and libc functions a title lacks are bound to the platform's.
+# RADV_ARCHIVE names the Vulkan driver; without it an empty archive stands in.
+archive=${RADV_ARCHIVE:-}
+if [[ -z $archive ]]; then
+  archive="$work/no-driver.a"
+  [[ -f $archive ]] || "$sdk/bin/llvm-ar" rc "$archive"
+fi
+# The recipe looks for clang's builtins at <resource-dir>/lib/linux/
+# libclang_rt.builtins-x86_64.a; Fedora keeps them in lib/<triple>/
+# libclang_rt.builtins.a. A shim reports a resource dir that has them there.
+host_rt=$(clang -print-libgcc-file-name -rtlib=compiler-rt 2>/dev/null || true)
+shim="$work/clang-shim"
+if [[ -f $host_rt && ! -x $shim/clang ]]; then
+  mkdir -p "$shim/rt/lib/linux"
+  ln -sf "$host_rt" "$shim/rt/lib/linux/libclang_rt.builtins-x86_64.a"
+  printf '#!/bin/sh\n[ "$1" = --print-resource-dir ] && { echo "%s"; exit 0; }\nexec clang "$@"\n' "$shim/rt" > "$shim/clang"
+  chmod +x "$shim/clang"
+fi
+# shellcheck source=/dev/null
+source "$vulkan/tools/radv-link.sh"
+PS5_CLANG=$([[ -x $shim/clang ]] && echo "$shim/clang" || command -v clang) radv_link_recipe "$vulkan" "$sdk" "$archive" || exit 2
+# A title publishes no exports.
+printf '{\n    local: *;\n};\n' > "$work/title-local.map"
+"$sdk/bin/prospero-lld" --error-limit=0 -z nodynamic-undefined-weak "${radv_linker_script[@]}" --eh-frame-hdr \
+  "${radv_link_flags[@]}" --version-script "$work/title-local.map" \
   --version-script "$native/app-symbols.map" --exclude-libs=ALL \
   -e _start -o "$work/llvm-pie.elf" "$work/app_crt.o" "$work/app_cpp_runtime.o" \
-  --start-group "$@" "$sdk/target/lib/libps5platform.a" --end-group \
+  --start-group "$@" --end-group "${radv_link_inputs[@]}" \
   --as-needed "$sdk"/target/lib/*.so
 # A title doesn't get libkernel_sys, libkernel_web or libScePosixForWebKit:
 # imports only they export are NULL at run time (FINDINGS 7, PS5_PORT.md traps).

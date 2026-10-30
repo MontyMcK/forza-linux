@@ -103,6 +103,10 @@ bool write_watch_written(uint64_t start, uint64_t end) {
     return n != 0;  // written pages, or an error: upload to be safe
 }
 
+bool write_watch_on_fault(uint64_t, bool) { return false; }
+
+void write_watch_before_kernel_write(void*, size_t) {}
+
 bool pages_mapped(uint64_t start, uint64_t end) {
     return msync(reinterpret_cast<void*>(start), end - start, MS_ASYNC) == 0;
 }

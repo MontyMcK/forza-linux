@@ -28,6 +28,16 @@ bool write_watch_reset(uint64_t start, uint64_t end, bool strict, WrittenFn on_w
 // True if a page of [start, end) was written since its last reset (or on error).
 bool write_watch_written(uint64_t start, uint64_t end);
 
+// Hosts that watch writes with page protection (the PS5) fault on the first
+// write to a watched page: the runtime's SIGSEGV handler calls this first and
+// resumes if it returns true. Linux (userfaultfd) never faults: false.
+bool write_watch_on_fault(uint64_t addr, bool write);
+
+// Call before the kernel writes into memory that may be watched (read() into
+// a game buffer): a protected page would fail the write (EFAULT) instead of
+// faulting. Linux: nothing to do.
+void write_watch_before_kernel_write(void* addr, size_t size);
+
 // False if a page of [start, end) is unmapped / can't be read (reserved but
 // never committed).
 bool pages_mapped(uint64_t start, uint64_t end);

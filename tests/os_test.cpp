@@ -2,7 +2,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <string>
 #include <thread>
+#include <sys/socket.h>
 
 #include <cstdint>
 #include <cstring>
@@ -20,15 +22,44 @@ using namespace fl;
 using clk = std::chrono::steady_clock;
 
 static int failures;
+static int out_fd = -1;  // the PS5's network log (a title's printf goes nowhere)
+static void say(const char* line) {
+    std::printf("%s\n", line);
+    if (out_fd >= 0) {
+        std::string l = std::string(line) + "\n";
+        send(out_fd, l.data(), l.size(), 0);
+    }
+}
 static void check(bool ok, const char* what) {
-    std::printf("%s  %s\n", ok ? "PASS" : "FAIL", what);
+    say((std::string(ok ? "PASS  " : "FAIL  ") + what).c_str());
     if (!ok) failures++;
 }
 static double ms_since(clk::time_point t) {
     return std::chrono::duration<double, std::milli>(clk::now() - t).count();
 }
 
+#ifdef OH2_LOG_HOST
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+// On the PS5 (a title has no visible stdout): send the output to
+// tools/ps5/netlog.py on the PC.
+static void stdout_to_netlog() {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(OH2_LOG_PORT);
+    a.sin_addr.s_addr = inet_addr(OH2_LOG_HOST);
+    if (s >= 0 && connect(s, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0) out_fd = s;
+}
+#endif
+
 int main() {
+#ifdef OH2_LOG_HOST
+    stdout_to_netlog();
+    say("os_test on the PS5 backend");
+#endif
     std::atomic<int32_t> word{0};
 
     // A waiter sleeps until another thread changes the word and wakes it.
@@ -155,6 +186,6 @@ int main() {
     check(seen_rax == 0x1234567890abcdefull && seen_xmm0 == 0x1234567890abcdefull && after == 0x55,
           "signal context: read rax and xmm0, write rax");
 
-    std::printf("%s\n", failures ? "FAILED" : "all passed");
+    say(failures ? "FAILED" : "all passed");
     return failures ? 1 : 0;
 }

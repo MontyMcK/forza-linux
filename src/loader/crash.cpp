@@ -28,6 +28,7 @@
 #include "platform/os/thread.h"
 #include "platform/os/signal_context.h"
 #include "platform/os/debug.h"
+#include "platform/os/write_watch.h"
 
 namespace fl::loader {
 namespace {
@@ -133,6 +134,7 @@ void handler(int sig, siginfo_t* si, void* uc_) {
     // Write-tracked GPU memory: the hook unprotects the page and we retry.
     // os::kErr bit 1 = the access was a write (x86 page-fault error code).
     if (sig == SIGSEGV && watch_fault(fault, g)) return;
+    if (sig == SIGSEGV && os::write_watch_on_fault(fault, (g[os::kErr] & 2) != 0)) return;
     if (sig == SIGSEGV && g_fault_hook && g_fault_hook(fault, (g[os::kErr] & 2) != 0)) return;
 
     for (auto& t : g_data_traps) {

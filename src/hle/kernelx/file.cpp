@@ -27,6 +27,7 @@
 #include "hle/kernelx/sync_objects.h"
 #include "hle/kernelx/vfs.h"
 #include "hle/registry.h"
+#include "platform/os/write_watch.h"
 
 namespace fl::kx {
 namespace {
@@ -222,6 +223,7 @@ BOOL do_io(HANDLE h, void* buf, DWORD n, DWORD* done, Overlapped* ov, bool is_wr
     if (done) *done = 0;
     if (ov) {
         off_t off = (static_cast<off_t>(ov->OffsetHigh) << 32) | ov->Offset;
+        if (!is_write) os::write_watch_before_kernel_write(buf, n);
         ssize_t r = is_write ? pwrite(f->fd, buf, n, off) : pread(f->fd, buf, n, off);
         if (r < 0) {
             set_last_error(errno_to_win(errno));
@@ -240,6 +242,7 @@ BOOL do_io(HANDLE h, void* buf, DWORD n, DWORD* done, Overlapped* ov, bool is_wr
         set_last_error(ERROR_IO_PENDING);
         return FALSE_;
     }
+    if (!is_write) os::write_watch_before_kernel_write(buf, n);
     size_t total = 0;
     while (total < n) {
         ssize_t r = is_write ? write(f->fd, static_cast<uint8_t*>(buf) + total, n - total)

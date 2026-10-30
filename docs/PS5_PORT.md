@@ -140,7 +140,9 @@ The PS5 binary statically links PS5_Vulkan's RADV build and link recipe, and the
 - [x] Title toolchain from PS5_Vulkan (`setup_deps.sh`, `cc.sh`, `link_title.sh`): a C title links, signs and packages (probe title, 2026-10-30). PS5_Vulkan f410e67's own skeleton build misses `libps5platform.a` (undefined `ps5_fp_ieee` from app_crt); `link_title.sh` links it
 
 ### Step 6: PS5 game backend
-- [ ] PS5 side of `src/platform/os/`; game folder only from the launcher or `--game-dir`
+- [x] PS5 side of `src/platform/os/` (`src/platform/os/ps5/`): futex (umtx), files, memory (reservations + direct memory in 64 KiB units, exec via sceKernelMprotect, checked copies via sceKernelQueryMemoryProtection), thread env (sysarch GS, MXCSR 0x1f80, ids via pthread_getthreadid_np + a pthread_t registry), signal context (measured offsets), write watch (mprotect + SIGSEGV through `os::write_watch_on_fault` in the crash handler; `write_watch_before_kernel_write` before ReadFile), diagnostics. **tests/os_test.cpp: 22/22 on the console** (`build.sh os-test-title`, 2026-10-30). Audio, window, input: stubs that log UNIMPLEMENTED
+- [ ] Display (VK_KHR_display / VideoOut through DXVK), ScePad input, SceAudioOut
+- [ ] The runtime itself built for the PS5 (CMake with cmake/ps5.cmake + link_title.sh); game folder only from the launcher or `--game-dir`
 
 ### Step 7: PS5 launcher (after M2)
 - [ ] Native launcher (Dear ImGui on PS5_Vulkan unless something is clearly better), DualSense only

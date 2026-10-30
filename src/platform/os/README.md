@@ -1,7 +1,8 @@
 # src/platform/os: what the runtime needs from the host OS
 
 One header per area here; one implementation per OS in `src/platform/os/<os>/`.
-CMake builds the backend named by `FL_OS` (default `linux`) as the `fl_os` library; the PS5 backend
+CMake builds the backend named by `FL_OS` (default `linux`) as the `fl_os` library
+(`ps5/` passes tests/os_test.cpp on the console: `tools/ps5/build.sh os-test-title`); the PS5 backend
 (`ps5/`) comes with docs/PS5_PORT.md Step 6. Code outside this folder must not
 call the OS directly for anything listed below.
 

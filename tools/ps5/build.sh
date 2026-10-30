@@ -3,7 +3,8 @@
 #   tools/ps5/build.sh probe     the platform probe payload (build-ps5/probe/oh2probe.elf)
 #   tools/ps5/build.sh copydump  copies the user's dump from USB to /data/OpenHorizon2 on the console
 #   tools/ps5/build.sh probe-title  the probe as the title's eboot, packaged (needs tools/ps5/setup_deps.sh)
-#   tools/ps5/build.sh launch    payload that starts the title (build-ps5/launch/oh2launch.elf)
+#   tools/ps5/build.sh launch    payloads that start the title / report what runs (build-ps5/launch/)
+#   tools/ps5/build.sh os-test-title  tests/os_test.cpp on the PS5 backend, as the title's eboot
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 target=${1:-probe}
@@ -30,6 +31,20 @@ case $target in
     "$ps5_root/tools/ps5/cc.sh" -std=gnu11 -O1 -Wall -Werror -DOH2_PROBE_TITLE "${netlog[@]}" \
       -c "$ps5_root/tools/ps5/probe/oh2probe.c" -o "$out/oh2probe.o"
     "$ps5_root/tools/ps5/link_title.sh" "$out/eboot.bin" "$out/oh2probe.o"
+    "$ps5_root/tools/ps5/package.sh" "$out/eboot.bin" ;;
+  os-test-title)
+    # tests/os_test.cpp on the PS5 backend, packaged as the title's eboot;
+    # its output goes to tools/ps5/netlog.py (PS5_LOG_HOST).
+    out="$ps5_root/build-ps5/os-test"
+    mkdir -p "$out"
+    objs=()
+    for src in "$ps5_root"/tests/os_test.cpp "$ps5_root"/src/platform/os/ps5/*.cpp "$ps5_root"/src/common/log.cpp; do
+      obj="$out/$(basename "${src%.cpp}").o"
+      "$ps5_root/tools/ps5/cc.sh" -std=c++20 -O2 -Wall -Werror -Wno-unused-parameter -fno-exceptions \
+        -DOH2_LOG_HOST=\"$PS5_LOG_HOST\" -DOH2_LOG_PORT="${PS5_LOG_PORT:-9599}" -I"$ps5_root/src" -c "$src" -o "$obj"
+      objs+=("$obj")
+    done
+    "$ps5_root/tools/ps5/link_title.sh" "$out/eboot.bin" "${objs[@]}"
     "$ps5_root/tools/ps5/package.sh" "$out/eboot.bin" ;;
   launch)
     out="$ps5_root/build-ps5/launch"
