@@ -28,6 +28,11 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef OH2_PROBE_TITLE
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#endif
 
 #ifdef OH2_PROBE_TITLE
 #define OH2_PROBE_CONTEXT "title"
@@ -76,6 +81,65 @@ int _umtx_op(void *obj, int op, unsigned long val, void *uaddr, void *uaddr2);
 static int log_fd = -1;
 static int n_pass, n_fail;
 
+#ifdef OH2_PROBE_TITLE
+/* A title's /download0 is a disk image FTP can't read into, and its sandbox
+ * may not show /data: the log is also kept in memory and uploaded to the
+ * console's own FTP server (ftpsrv, another process) over the loopback after
+ * each test group, so a crash still leaves what came before. */
+static char remote_log[64 << 10];
+static size_t remote_len;
+
+static int ftp_reply(int s, char *line, size_t n) {
+  size_t k = 0;
+  for (;;) { /* read until a final "NNN " line */
+    char c;
+    if (recv(s, &c, 1, 0) != 1) return -1;
+    if (k + 1 < n) line[k++] = c;
+    if (c == '\n') {
+      line[k] = 0;
+      if (k >= 4 && line[3] == ' ') return atoi(line);
+      k = 0;
+    }
+  }
+}
+
+static int ftp_cmd(int s, const char *cmd, char *line, size_t n) {
+  send(s, cmd, strlen(cmd), 0);
+  return ftp_reply(s, line, n);
+}
+
+static int tcp_connect(uint32_t ip, int port) {
+  int s = socket(AF_INET, SOCK_STREAM, 0);
+  struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(port), .sin_addr.s_addr = ip};
+  if (s >= 0 && connect(s, (struct sockaddr *)&a, sizeof a) == 0) return s;
+  if (s >= 0) close(s);
+  return -1;
+}
+
+static int upload_log(void) {
+  char line[512];
+  int c = tcp_connect(htonl(INADDR_LOOPBACK), 2121);
+  if (c < 0) return -1;
+  int ok = ftp_reply(c, line, sizeof line) == 220 && ftp_cmd(c, "USER anonymous\r\n", line, sizeof line) / 100 <= 3 &&
+           ftp_cmd(c, "PASS oh2\r\n", line, sizeof line) / 100 == 2 && ftp_cmd(c, "TYPE I\r\n", line, sizeof line) / 100 == 2 &&
+           ftp_cmd(c, "PASV\r\n", line, sizeof line) == 227;
+  int d = -1;
+  if (ok) {
+    unsigned h[4], p[2];
+    char *q = strchr(line, '(');
+    ok = q && sscanf(q + 1, "%u,%u,%u,%u,%u,%u", &h[0], &h[1], &h[2], &h[3], &p[0], &p[1]) == 6;
+    if (ok) d = tcp_connect(htonl(INADDR_LOOPBACK), (int)(p[0] * 256 + p[1]));
+    ok = d >= 0 && ftp_cmd(c, "STOR /data/homebrew/PPSA99642/logs/probe-title.txt\r\n", line, sizeof line) / 100 == 1;
+  }
+  if (ok) send(d, remote_log, remote_len, 0);
+  if (d >= 0) close(d);
+  if (ok) ok = ftp_reply(c, line, sizeof line) == 226;
+  ftp_cmd(c, "QUIT\r\n", line, sizeof line);
+  close(c);
+  return ok ? 0 : -1;
+}
+#endif
+
 static void say(const char *fmt, ...) {
   char buf[1024];
   va_list ap;
@@ -89,7 +153,19 @@ static void say(const char *fmt, ...) {
     write(log_fd, buf, n);
     fsync(log_fd);
   }
+#ifdef OH2_PROBE_TITLE
+  if (remote_len + n <= sizeof remote_log) {
+    memcpy(remote_log + remote_len, buf, n);
+    remote_len += n;
+  }
+#endif
 }
+
+#ifdef OH2_PROBE_TITLE
+#define CHECKPOINT() upload_log()
+#else
+#define CHECKPOINT() ((void)0)
+#endif
 #define INFO(name, ...) say("INFO " name ": " __VA_ARGS__)
 #define PASS(name, ...) (n_pass++, say("PASS " name ": " __VA_ARGS__))
 #define FAIL(name, ...) (n_fail++, say("FAIL " name ": " __VA_ARGS__))
@@ -858,21 +934,31 @@ int main(void) {
   }
   say("Open Horizon 2 platform probe, %s build, %s %s, log %s", OH2_PROBE_CONTEXT, __DATE__, __TIME__, log_path);
   install_handlers(0);
+#ifdef OH2_PROBE_TITLE
+  say("INFO log: local file %s", log_fd >= 0 ? "open" : "not writable, loopback FTP only");
+  if (upload_log()) say("INFO log: loopback FTP upload failed");
+  test_title_sandbox(); /* first: what the port needs most */
+  CHECKPOINT();
+#endif
   test_info();
+  CHECKPOINT();
   test_exec_flexible();
   test_gsbase();
   test_umtx();
+  CHECKPOINT();
   test_reserve();
   test_dmem();
+  CHECKPOINT();
   test_signal_context();
   test_write_faults();
   test_other_signals();
+  CHECKPOINT();
   test_files();
 #ifdef OH2_PROBE_TITLE
-  test_title_sandbox();
   test_title_limits();
 #endif
   say("DONE %d pass, %d fail", n_pass, n_fail);
+  CHECKPOINT();
   close(log_fd);
   return 0;
 }

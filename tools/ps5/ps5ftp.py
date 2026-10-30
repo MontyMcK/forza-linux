@@ -123,8 +123,9 @@ class Console:
         tmp = posixpath.join(posixpath.dirname(remote), "." + posixpath.basename(remote) + ".upload")
         with open(local, "rb") as f:
             self.ftp.storbinary(f"STOR {tmp}", f, blocksize=1 << 20)
-        if self.size(remote) is not None:
-            self.ftp.delete(remote)
+        # Rename over the old file (atomic): never delete it first. ShadowMount+
+        # scans title folders, and on 2026-10-30 it caught eboot.bin missing in
+        # that gap and gave up on the title until the next console restart.
         self.ftp.rename(tmp, remote)
         want, got = os.path.getsize(local), self.size(remote)
         if want != got:
@@ -180,6 +181,10 @@ def main(argv):
                     files.append((p, posixpath.join(remote, os.path.relpath(p, local).replace(os.sep, "/"))))
         else:
             files.append((local, remote))
+        # A title's eboot.bin and param.json go last, so the folder never
+        # looks like a complete title while other files are still arriving.
+        last = ("eboot.bin", "sce_sys/param.json")
+        files.sort(key=lambda f: any(f[1].endswith("/" + n) for n in last))
         if not dump:
             bad = [p for p, _ in files if looks_like_game_data(p)]
             if bad:

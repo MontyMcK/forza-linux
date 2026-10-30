@@ -1,8 +1,11 @@
 /* Starts the Open Horizon 2 title (OH2_TITLE_ID) on the console, as a payload
  * sent with tools/ps5/send_payload.sh, so test runs don't need anyone at the
- * console. Tries the launch calls homebrew launchers use (sceLncUtilLaunchApp
- * with the foreground user, then the first logged-in user, then
- * sceSystemServiceLaunchApp) and logs each result to the title's log folder.
+ * console. It logs which app is running; if that is our own title (an earlier
+ * run that hasn't ended), it closes it first. Any other app is left alone and
+ * the launch is skipped. Then it tries the launch calls homebrew launchers use
+ * (sceLncUtilLaunchApp with the foreground user, then the first logged-in
+ * user, then sceSystemServiceLaunchApp) and logs each result to the title's
+ * log folder.
  * Our own code, written from the public libSceSystemService and
  * libSceUserService interfaces.
  */
@@ -35,6 +38,9 @@ int sceUserServiceInitialize(void *param);
 int sceUserServiceGetForegroundUser(int *user_id);
 int sceUserServiceGetLoginUserIdList(login_users_t *list);
 int sceLncUtilLaunchApp(const char *title_id, const char *argv[], launch_param_t *param);
+uint32_t sceLncUtilGetAppIdOfRunningBigApp(void);
+int sceLncUtilGetAppTitleId(uint32_t app_id, char *title_id);
+uint32_t sceLncUtilKillApp(uint32_t app_id);
 int sceSystemServiceLaunchApp(const char *title_id, const char *argv[], launch_param_t *param);
 
 static int log_fd = -1;
@@ -55,6 +61,19 @@ int main(void) {
   mkdir("/data/homebrew/" OH2_TITLE_ID "/logs", 0777);
   log_fd = open(LOG_PATH, O_WRONLY | O_CREAT | O_APPEND, 0666);
   sceUserServiceInitialize(0);
+  uint32_t running = sceLncUtilGetAppIdOfRunningBigApp();
+  char title[32] = "";
+  if (running != 0 && running != 0xffffffffu) sceLncUtilGetAppTitleId(running, title);
+  say("running big app: id 0x%x title '%s'", running, title);
+  if (title[0] && strcmp(title, OH2_TITLE_ID) != 0) {
+    say("another app is running: not launching over it");
+    return 1;
+  }
+  if (!strcmp(title, OH2_TITLE_ID)) {
+    uint32_t k = sceLncUtilKillApp(running);
+    say("closed our earlier run (app 0x%x) -> 0x%08x", running, k);
+    for (int i = 0; i < 40 && sceLncUtilGetAppIdOfRunningBigApp() == running; i++) usleep(250000);
+  }
   int fg = -1, login = -1;
   sceUserServiceGetForegroundUser(&fg);
   login_users_t users;
