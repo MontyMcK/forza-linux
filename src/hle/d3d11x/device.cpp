@@ -5,6 +5,9 @@
 #include <cstring>
 #include <string>
 
+#include <mutex>
+#include <vector>
+#include <algorithm>
 #include "common/log.h"
 #include "common/wstr.h"
 #include "hle/d3d11x/d3d11x.h"
@@ -15,6 +18,9 @@
 
 namespace fl::d3d {
 namespace {
+
+std::mutex g_devices_mutex;
+std::vector<DeviceX*> g_devices;  // live devices (device_for_dxvk)
 
 using winrt::Iface;
 using winrt::Object;
@@ -228,6 +234,10 @@ WINAPI HRESULT D3D11XCreateDeviceX_(const CreateDeviceParams* p, void** out_devi
 
     auto* d = new DeviceX();
     d->dxvk = dev;
+    {
+        std::lock_guard lock(g_devices_mutex);
+        g_devices.push_back(d);
+    }
     d->creation_flags = p->flags;
     d->immediate = make_context(d, ctx, false);
     FL_LOG(d3d, "immediate context: dxvk %p, game block %p", ctx, static_cast<void*>(d->immediate));
@@ -245,6 +255,13 @@ WINAPI HRESULT D3D11XCreateDeviceX_(const CreateDeviceParams* p, void** out_devi
 
 }  // namespace
 
+DeviceX* device_for_dxvk(void* dxvk_device) {
+    std::lock_guard lock(g_devices_mutex);
+    for (DeviceX* d : g_devices)
+        if (d->dxvk == dxvk_device) return d;
+    return g_devices.size() == 1 ? g_devices.front() : nullptr;  // the game makes one device
+}
+
 DeviceX::DeviceX() : Object(u"D3D11DeviceX"), device_iface(device_vt(), this), dxgi_iface(dxgi_device_vt(), this) {
     expose(IID_ID3D11Device, &device_iface);
     expose(IID_ID3D11Device1, &device_iface);
@@ -258,6 +275,10 @@ DeviceX::DeviceX() : Object(u"D3D11DeviceX"), device_iface(device_vt(), this), d
 
 DeviceX::~DeviceX() {
     FL_LOG(d3d, "D3D11DeviceX destroyed");
+    {
+        std::lock_guard lock(g_devices_mutex);
+        g_devices.erase(std::remove(g_devices.begin(), g_devices.end(), this), g_devices.end());
+    }
     if (immediate) {
         dx_release(immediate->dxvk);
         delete immediate;
