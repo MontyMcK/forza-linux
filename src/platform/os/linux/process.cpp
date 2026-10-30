@@ -3,11 +3,14 @@
 #include <cstdio>
 #include <unistd.h>
 
+#include "common/log.h"
+
 namespace fl::os {
 
 std::vector<std::string> saved_args() { return {}; }
 
 void exit_process(int code) {
+    log_flush();
     fflush(nullptr);
     _exit(code);
 }

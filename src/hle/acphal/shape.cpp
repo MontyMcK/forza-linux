@@ -133,10 +133,15 @@ struct FfmpegDecoder : Decoder {
 };
 #endif
 
+// FL_XMA=silent (tests): the silent decoder even when FFmpeg's is built, as
+// on the PS5 until FFmpeg is built for it.
 std::unique_ptr<Decoder> make_decoder(int channels, int rate) {
 #if FL_HAVE_FFMPEG_XMA
-    auto d = std::make_unique<FfmpegDecoder>(channels, rate);
-    if (d->ok()) return d;
+    static const bool silent = getenv("FL_XMA") && !strcmp(getenv("FL_XMA"), "silent");
+    if (!silent) {
+        auto d = std::make_unique<FfmpegDecoder>(channels, rate);
+        if (d->ok()) return d;
+    }
 #endif
     FL_STUB_ONCE("SHAPE: no FFmpeg XMA decoder (tools/build_ffmpeg_xma.sh): XMA voices play as silence");
     (void)rate;

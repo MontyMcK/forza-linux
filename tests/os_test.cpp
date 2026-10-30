@@ -122,7 +122,7 @@ int main() {
     check(os::resident_bytes() > 0, "resident_bytes");
 
     // Write watching: registering a range that starts inside a watched one
-    // merges them (the PS5 backend once erased one map entry twice here).
+    // watches the union (the PS5 backend once erased one map entry twice here).
     auto* ww = static_cast<uint8_t*>(os::map_anon(nullptr, 6 * page, os::kRead | os::kWrite));
     uint64_t w0 = reinterpret_cast<uint64_t>(ww);
     size_t runs = 0;
@@ -131,7 +131,7 @@ int main() {
          os::write_watch_register(w0 + page, w0 + 6 * page) && os::write_watch_register(w0 + 2 * page, w0 + 3 * page);
     ok = ok && os::write_watch_reset(w0, w0 + 6 * page, true, count, &runs) && runs >= 1 &&
          !os::write_watch_written(w0, w0 + 6 * page);
-    check(ok, "write watch: overlapping registrations merge into one watched range");
+    check(ok, "write watch: overlapping registrations watch their union");
 
     // Checked copies stop at memory they can't access.
     auto* two = static_cast<uint8_t*>(os::map_anon(nullptr, 2 * page, os::kRead | os::kWrite));

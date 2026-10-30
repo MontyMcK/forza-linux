@@ -128,6 +128,21 @@ size_t pool_budget() {
     return n;
 }
 
+// FL_LOG=fps: how often the pool reopens files and what that costs (an
+// open() is slow on some hosts); single opens over 20 ms are logged.
+void note_reopen(double seconds, const std::string& path) {
+    static uint64_t count = 0;
+    static double total = 0, worst = 0, since = run_time();
+    if (!log_enabled("fps")) return;
+    count++, total += seconds, worst = std::max(worst, seconds);
+    if (seconds > 0.02) log_write("fps", "file pool: reopening %s took %.1f ms", path.c_str(), seconds * 1000);
+    if (run_time() - since >= 10) {
+        log_write("fps", "file pool: %llu reopens in %.1f s, open() %.2f ms average, %.1f ms worst",
+                  (unsigned long long)count, run_time() - since, total / count * 1000, worst * 1000);
+        count = 0, total = 0, worst = 0, since = run_time();
+    }
+}
+
 // Adds f (its fd just opened) to the pool and, over the budget, closes the
 // least recently used idle one (if every one is busy, the pool stays over for
 // now). Caller holds g_pool_mutex.
@@ -152,7 +167,9 @@ struct HostFd {
         if (!f.pooled) return;
         std::lock_guard lock(g_pool_mutex);
         if (f.fd < 0) {
+            double t0 = run_time();
             f.fd = open(f.path.c_str(), O_RDONLY | O_CLOEXEC);
+            note_reopen(run_time() - t0, f.path);
             if (f.fd < 0) {
                 FL_ERROR("file: reopening %s failed: %s", f.path.c_str(), strerror(errno));
                 fd = -1;

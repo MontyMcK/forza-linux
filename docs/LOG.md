@@ -442,3 +442,10 @@ Where things stand (Monty asked for a handoff):
 - Also: PPSA01317.ffpfsc on the console is Gran Turismo 7; Monty's one Miles Morales copy is the PS5 one (a 1 GB PC fragment was deleted on request).
 - Linux check: os_test, concrt_token_test pass, FL_EXIT_AFTER_FRAME=600 and the 64-file pool run to 1500 both clean.
 - **Next:** Monty presses A twice on the new build (save should work now); M2 card still unanswered; then the missing title-screen background.
+
+## 2026-10-31: Claude: in game on the PS5 (Monty), half speed
+
+- The 1 fps cinematic was our own `d3d` log channel (FINDINGS 7.12); the log file is batched now. Monty reached the game world: ~13 fps, CPU-bound, so the game runs at about half speed.
+- Linux baseline of the same scene shows the PS5 write-watch backend 14-25x slower per operation; fixed its per-page map lookups (each_page walks ranges, written() stops early), no more range merging, sequential fault runs. Console os_test 23/23.
+- Test switches added: `FL_XMA=silent` (silent XMA decoder on Linux), `FL_OPEN_FILE_BUDGET`, file-pool reopen stats under FL_LOG=fps.
+- **Next:** measure in game with the faster backend (Monty presses A); then the remaining per-frame costs (DXVK CS thread, the game's own threads on the slower CPU, re-arm mprotects); M2 card still unanswered.

@@ -20,6 +20,7 @@ std::vector<std::string> saved_args() {
 
 void exit_process(int code) {
     log_write("loader", "the runtime ended (code %d); a PS5 title can't close itself: close it from the home screen", code);
+    log_flush();
     fflush(nullptr);
     for (;;) sleep(3600);
 }
