@@ -6,11 +6,9 @@
 // when it changed.
 //
 // Changes are found the way Windows' GetWriteWatch finds them (Azimuth uses
-// that, FINDINGS §6): userfaultfd write-protection in async mode. The kernel
-// records the first write to each protected page itself (no fault reaches us,
-// and kernel writes such as read() into the page work), PAGEMAP_SCAN reports
-// written pages and re-protects them. Replaced an mprotect + SIGSEGV scheme
-// that broke kernel writes and raced between threads (2026-10-25).
+// that, FINDINGS §6), through os/write_watch.h (Linux: userfaultfd async
+// write-protection + PAGEMAP_SCAN). This file is the policy: which ranges are
+// tracked, re-registering remapped memory, the per-frame scan in slices.
 #pragma once
 
 #include <mutex>

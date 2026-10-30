@@ -17,5 +17,5 @@ call the OS directly for anything listed below.
 | Input | input.h | SDL3 gamepad / keyboard | ScePad | yes |
 | Controller output (rumble, triggers) | input.h (`set_vibration`) | SDL3 | ScePad | yes |
 | Audio out | audio.h | SDL3 audio stream | SceAudioOut | yes |
-| GPU write tracking (incl. gpumem's `mapped`/`readable` page probes) | | userfaultfd + PAGEMAP_SCAN, `msync`, `process_vm_readv` | mprotect + SIGSEGV | no |
+| GPU write tracking (GetWriteWatch-like) and page probes | write_watch.h | userfaultfd async WP + PAGEMAP_SCAN, `msync`, `process_vm_readv` | mprotect + SIGSEGV (~41 us/fault, FINDINGS 7.3) | yes |
 | Crash/debug reports: thread list, signal stacks | | `/proc/self/task`, `sigaltstack` | (to find) | no |
