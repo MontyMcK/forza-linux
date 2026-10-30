@@ -23,7 +23,7 @@ Run the runtime (`forza-linux`) and a native launcher as one homebrew title on M
 | Payloads | elfldr v0.27 on :9021, installed 2026-10-30 at Monty's request into `/data/pldmgr/payloads/elfldr/`, not autoloaded: Monty starts it after each jailbreak, and `send_payload.sh` starts it through pldmgr if it's down |
 | Logs | files on the console, pulled over FTP into `research/private/ps5-logs/` (no klog server) |
 | Title | **PPSA99642** (no GitHub code hits and unused by every reference project on 2026-10-30; taken: 99005, 99008, 99010, 99014, 99015, 99130, 99169-99171, 99300-99304, 99399, 99611, 99702, 99790, 99988-99999), folder `/data/homebrew/PPSA99642` (ShadowMount+ registers folder titles there) |
-| Dump | Monty's own dump, `Mount/` only (40 GB), copied on 2026-10-30 to Monty's 500 GB USB stick "MONTYS 512" (exFAT, MBR: the PS5 can't see GPT drives) as `Anthem_1.0.0.64_x64__8wekyb3d8bbwe/Mount/`; Monty then copies it to the PS5's **internal storage** (suggested `/data/OpenHorizon2/…`, outside `/data/homebrew`, which ShadowMount+ scans). The launcher finds it wherever it ends up |
+| Dump | Monty's own dump, `Mount/` only (40 GB), copied on 2026-10-30 to Monty's 500 GB USB stick "MONTYS 512" (exFAT, MBR: the PS5 can't see GPT drives) as `Anthem_1.0.0.64_x64__8wekyb3d8bbwe/Mount/`; then, at Monty's request, copied on the console to **`/data/OpenHorizon2/Anthem_1.0.0.64_x64__8wekyb3d8bbwe/Mount`** by the `oh2copydump` payload (outside `/data/homebrew`, which ShadowMount+ scans). The launcher must still find it wherever a user puts it |
 
 Scripts (`tools/ps5/`, settings in the gitignored `tools/ps5/ps5.env`; `ps5.env.example` is the template):
 
@@ -34,6 +34,7 @@ Scripts (`tools/ps5/`, settings in the gitignored `tools/ps5/ps5.env`; `ps5.env.
 | `pull_logs.sh [DIR...]` | copies `PS5_LOG_REMOTE` (or DIRs) to `research/private/ps5-logs/<time>/`, `latest` links to it |
 | `upload_title.sh [DIR]` | audits, then uploads the title folder to `/data/homebrew/PPSA99642` |
 | `upload_dump.sh --i-was-asked MOUNT` | uploads a dump over FTP; only when Monty asks |
+| `build.sh copydump` + `send_payload.sh` | copies a dump from `/mnt/usbN/<folder>/Mount` to `/data/OpenHorizon2/<folder>/Mount` on the console (resumable, checks free space and sizes; log `copydump.txt`); only when Monty asks |
 | `ps5ftp.py ls/get/put/cat` | the FTP client behind them; `put` refuses game data and anything outside the title folder |
 
 ## Research (Step 2): what each project gives us

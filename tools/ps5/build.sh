@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds PS5 targets into build-ps5/ (gitignored).
 #   tools/ps5/build.sh probe     the platform probe payload (build-ps5/probe/oh2probe.elf)
+#   tools/ps5/build.sh copydump  copies the user's dump from USB to /data/OpenHorizon2 on the console
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 target=${1:-probe}
@@ -12,5 +13,11 @@ case $target in
     "$PS5_PAYLOAD_SDK/bin/prospero-clang" -std=gnu11 -O1 -Wall -Werror -lpthread \
       -o "$out/oh2probe.elf" "$ps5_root/tools/ps5/probe/oh2probe.c"
     echo "$out/oh2probe.elf" ;;
+  copydump)
+    out="$ps5_root/build-ps5/copydump"
+    mkdir -p "$out"
+    "$PS5_PAYLOAD_SDK/bin/prospero-clang" -std=gnu11 -O1 -Wall -Werror \
+      -o "$out/oh2copydump.elf" "$ps5_root/tools/ps5/copydump/oh2copydump.c"
+    echo "$out/oh2copydump.elf" ;;
   *) echo "unknown target: $target" >&2; exit 2 ;;
 esac
