@@ -434,3 +434,11 @@ Where things stand (Monty asked for a handoff):
 
 - Monty couldn't press A at the title screen, so the controller came first: src/platform/os/ps5/input.cpp reads ScePad (FINDINGS 7.9). On the console the pad opened and Monty's Cross presses reached the game as A; the game moved on ~4 s after the presses (new thread, XAudio2 lookup).
 - M2 TEST CARD still unanswered. **Next:** Monty reports what happens after A; Linux baseline of the title screen with FL_LOG=fps (draws per frame) to chase the missing 3D background (PS5: 2 draws, 0 command lists per frame there).
+
+## 2026-10-31: Claude: "Device full" and a thread-exit crash
+
+- Monty's A press led to "DEVICE FULL": failed save writes (FINDINGS 7.11). Fixed `mkdirs` for the title sandbox, then found EMFILE: the game keeps ~420 files open. Read-only files now share a descriptor pool (128 on the PS5). Commit failures now log the step and errno.
+- A relaunch crashed with signal 11 in a burst of short-lived game threads: thread_local destructors run after emulated TLS freed the storage (FINDINGS 7.10). Fixed in kernelx/thread.cpp and trace.cpp; build.sh guards against new ones.
+- Also: PPSA01317.ffpfsc on the console is Gran Turismo 7; Monty's one Miles Morales copy is the PS5 one (a 1 GB PC fragment was deleted on request).
+- Linux check: os_test, concrt_token_test pass, FL_EXIT_AFTER_FRAME=600 and the 64-file pool run to 1500 both clean.
+- **Next:** Monty presses A twice on the new build (save should work now); M2 card still unanswered; then the missing title-screen background.

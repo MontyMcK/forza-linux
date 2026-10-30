@@ -10,4 +10,7 @@ bool path_exists(const char* path) {
     return stat(path, &st) == 0;
 }
 
+// Of a title's 250 descriptors: the rest are for DXVK/RADV, saves, logs, sockets.
+int open_file_budget() { return 128; }
+
 }  // namespace fl::os

@@ -111,7 +111,12 @@ bool mkdirs(const std::string& path) {
     for (size_t p = 1; p <= path.size(); p++) {
         if (p == path.size() || path[p] == '/') {
             std::string d = path.substr(0, p);
-            if (mkdir(d.c_str(), 0755) != 0 && errno != EEXIST) return false;
+            // An existing folder is fine whatever mkdir says: in a PS5 title,
+            // mkdir of a folder above its own (/data) fails, but not with
+            // EEXIST (the errno wasn't recorded; FINDINGS 7.11).
+            struct stat st;
+            if (mkdir(d.c_str(), 0755) != 0 && errno != EEXIST && !(stat(d.c_str(), &st) == 0 && S_ISDIR(st.st_mode)))
+                return false;
         }
     }
     return true;
@@ -563,13 +568,19 @@ struct Container : Object {
     static WINAPI HRESULT get_Name(Iface* i, HSTRING* out) { return make_hstring(self(i)->name.c_str(), out); }
     static WINAPI HRESULT get_OwningSpace(Iface* i, void** out);
 
+    // Logs which step of a commit failed and why; returns E_FAIL.
+    static HRESULT failed(const char* step, const std::string& path) {
+        FL_ERROR("ConnectedStorage: %s %s failed: %s", step, path.c_str(), strerror(errno));
+        return E_FAIL;
+    }
+
     // Replace the container with (existing - deletes) + writes, atomically.
     HRESULT commit(const std::map<std::u16string, std::vector<uint8_t>>& writes, const std::vector<std::u16string>& deletes) {
         std::lock_guard lock(g_io);
         std::string parent = dir.substr(0, dir.rfind('/'));
         container_dir(parent, name);  // finish any interrupted commit
         std::string tmp = dir + ".new";
-        if (!mkdirs(tmp)) return E_FAIL;
+        if (!mkdirs(tmp)) return failed("mkdir", tmp);
         std::set<std::string> drop;
         for (auto& d : deletes) drop.insert(encode_name(d));
         for (auto& [k, v] : writes) drop.insert(encode_name(k));
@@ -577,17 +588,20 @@ struct Container : Object {
             if (drop.count(f)) continue;
             if (link((dir + "/" + f).c_str(), (tmp + "/" + f).c_str()) != 0) {
                 std::vector<uint8_t> data;  // no hard links (other filesystem): copy
-                if (!read_file(dir + "/" + f, &data) || !write_file_synced(tmp + "/" + f, data.data(), data.size()))
-                    return remove_tree(tmp), E_FAIL;
+                if (!read_file(dir + "/" + f, &data)) return failed("read", dir + "/" + f), remove_tree(tmp), E_FAIL;
+                if (!write_file_synced(tmp + "/" + f, data.data(), data.size()))
+                    return failed("write", tmp + "/" + f), remove_tree(tmp), E_FAIL;
             }
         }
         for (auto& [k, v] : writes)
-            if (!write_file_synced(tmp + "/" + encode_name(k), v.data(), v.size())) return remove_tree(tmp), E_FAIL;
+            if (!write_file_synced(tmp + "/" + encode_name(k), v.data(), v.size()))
+                return failed("write", tmp + "/" + encode_name(k)), remove_tree(tmp), E_FAIL;
         fsync_dir(tmp);
         struct stat st;
         bool had = stat(dir.c_str(), &st) == 0;
-        if (had && rename(dir.c_str(), (dir + ".old").c_str()) != 0) return remove_tree(tmp), E_FAIL;
-        if (rename(tmp.c_str(), dir.c_str()) != 0) return E_FAIL;
+        if (had && rename(dir.c_str(), (dir + ".old").c_str()) != 0)
+            return failed("rename", dir), remove_tree(tmp), E_FAIL;
+        if (rename(tmp.c_str(), dir.c_str()) != 0) return failed("rename", tmp);
         fsync_dir(parent);
         if (had) remove_tree(dir + ".old");
         return S_OK;

@@ -85,6 +85,13 @@ case $target in
     xargs -P "$jobs" -I{} sh -c 'o="$out/obj/$(echo "$1" | sed "s|$ps5_root/src/||; s|/|_|g").o"
       "$ps5_root/tools/ps5/cc-win.sh" -std=c++20 -O2 -g -Wall -Wextra -Wno-unused-parameter -fno-exceptions -fno-strict-aliasing \
         -I"$ps5_root/src" -I"$addr_inc" -I"$zsrc" -c "$1" -o "$o"' _ {} < "$out/sources.txt"
+    # A thread_local with a destructor is freed before that destructor runs on
+    # the PS5 (emulated TLS, FINDINGS 7.10): refuse to build one.
+    tls_dtors=$(for o in "$out"/obj/*.o; do "$sdkbin/llvm-nm" -u "$o" | grep -q __cxa_thread_atexit && basename "$o"; done || true)
+    if [[ -n $tls_dtors ]]; then
+      echo "build.sh: thread_locals with destructors (FINDINGS 7.10):" $tls_dtors >&2
+      exit 1
+    fi
     if (( use_radv )); then
       # DXVK (tools/ps5/build_dxvk.sh) on PS5_Vulkan's RADV
       gfx=("$dxvk"/libdxvk_d3d11.a "$dxvk"/libdxvk_dxgi.a "$dxvk"/libdxvk.a "$dxvk"/libwsi.a "$dxvk"/libvkcommon.a
