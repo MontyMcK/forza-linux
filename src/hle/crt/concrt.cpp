@@ -14,8 +14,6 @@
 #include <mutex>
 #include <thread>
 #include <vector>
-#include <sys/syscall.h>
-#include <linux/futex.h>
 
 #include "common/log.h"
 #include "common/winabi.h"
@@ -83,8 +81,7 @@ WINAPI size_t ev_wait(Event* self, unsigned timeout) {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);
     while (!self->state.load()) {
         if (std::chrono::steady_clock::now() >= deadline) return SIZE_MAX;
-        timespec ts = {0, 1000000};  // poll in 1 ms steps; timeouts are rare
-        syscall(SYS_futex, reinterpret_cast<int32_t*>(&self->state), FUTEX_WAIT_PRIVATE, 0, &ts, nullptr, 0);
+        os::futex_wait(&self->state, 0, 1000000);  // poll in 1 ms steps; timeouts are rare
     }
     return 0;
 }

@@ -5,18 +5,17 @@
 
 #include <atomic>
 #include <cstdint>
-#include <linux/futex.h>
-#include <sys/syscall.h>
-#include <unistd.h>
+
+#include "platform/os/futex.h"
 
 namespace fl::kx {
 
 inline void futex_wait(std::atomic<int32_t>* addr, int32_t expected) {
-    syscall(SYS_futex, reinterpret_cast<int32_t*>(addr), FUTEX_WAIT_PRIVATE, expected, nullptr, nullptr, 0);
+    os::futex_wait(addr, expected);
 }
 
 inline void futex_wake(std::atomic<int32_t>* addr, int32_t n) {
-    syscall(SYS_futex, reinterpret_cast<int32_t*>(addr), FUTEX_WAKE_PRIVATE, n, nullptr, nullptr, 0);
+    os::futex_wake(addr, n);
 }
 
 inline bool futex_try_lock(std::atomic<int32_t>* s) {

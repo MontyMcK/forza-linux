@@ -30,6 +30,11 @@ file(GLOB_RECURSE FL_SOURCES CONFIGURE_DEPENDS
   src/hle/*.cpp
   src/hle/*.S
   src/platform/*.cpp)
+# OS backends (src/platform/os/README.md): only the one named by FL_OS is built.
+set(FL_OS linux CACHE STRING "OS backend: src/platform/os/<FL_OS>/")
+list(FILTER FL_SOURCES EXCLUDE REGEX "/src/platform/os/[^/]+/")
+file(GLOB FL_OS_SOURCES CONFIGURE_DEPENDS src/platform/os/${FL_OS}/*.cpp)
+list(APPEND FL_SOURCES ${FL_OS_SOURCES})
 
 # AMD addrlib (MIT, from Mesa; third_party/addrlib/MESA_COMMIT): GCN surface layouts.
 file(GLOB_RECURSE FL_ADDRLIB_SOURCES third_party/addrlib/src/*.cpp)
@@ -87,6 +92,10 @@ target_link_libraries(dxvk_smoke PRIVATE ${FL_DXVK_LIBS})
 add_executable(gcn_layout_test tests/gcn_layout_test.cpp src/hle/xg/gcn.cpp src/common/log.cpp src/common/workers.cpp)
 target_include_directories(gcn_layout_test PRIVATE src)
 target_link_libraries(gcn_layout_test PRIVATE addrlib pthread)
+
+add_executable(os_test tests/os_test.cpp ${FL_OS_SOURCES})
+target_include_directories(os_test PRIVATE src)
+target_link_libraries(os_test PRIVATE pthread)
 
 # Dev tool (reads game files): untile a .swatchbin mip to PNG.
 add_executable(swatch_view tools/swatch_view.cpp src/hle/xg/gcn.cpp src/common/log.cpp src/common/png.cpp src/common/workers.cpp)

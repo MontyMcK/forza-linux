@@ -108,7 +108,18 @@ The PS5 binary statically links PS5_Vulkan's RADV build and link recipe, and the
 - [ ] **3b: the same probe as a title** (needs Step 5's packaging; can be a minimal title linked with the SDK + PS5_Vulkan recipe): direct memory budget and 1 GiB+ allocations, flexible budget, `access()` EPERM, file map in a reservation, `/data` and `/mnt/usbN` visibility with ShadowMount+, open-file limit, CPU affinity
 
 ### Step 4: platform layer (Linux only)
-- [ ] `src/platform/os/` interfaces + Linux backend, behaviour unchanged (Linux check after each move): memory, thread env (GS/TEB), futex, signal context, file existence, window/present, input, controller output, audio out, write tracking
+`src/platform/os/` interfaces + Linux backend (`FL_OS=linux`), behaviour unchanged, Linux check after each move; status table in `src/platform/os/README.md`; `tests/os_test.cpp` must pass on every backend:
+- [x] scaffolding: `FL_OS` backend selection in CMake, README, `os_test`
+- [x] futex (`os/futex.h`; futex_lock.h and concrt's timed wait use it)
+- [x] file existence (`os/files.h`; vfs uses it)
+- [ ] memory: reserve, commit, protect, exec, page size
+- [ ] thread environment (GS/TEB)
+- [ ] signal context access
+- [ ] window/present
+- [ ] input
+- [ ] controller output (rumble, trigger effects)
+- [ ] audio out
+- [ ] GPU write tracking
 
 ### Step 5: toolchain and packaging
 - [ ] `cmake/ps5.cmake` toolchain
