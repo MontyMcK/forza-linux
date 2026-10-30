@@ -42,6 +42,14 @@ uint64_t thread_id() {
     return id;
 }
 
+void current_stack(void** lo, size_t* size) {
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_get_np(pthread_self(), &attr);  // FreeBSD's pthread_getattr_np
+    pthread_attr_getstack(&attr, lo, size);
+    pthread_attr_destroy(&attr);
+}
+
 uint64_t process_id() { return static_cast<uint64_t>(getpid()); }
 
 bool signal_thread(uint64_t tid, int sig) {

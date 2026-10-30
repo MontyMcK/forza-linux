@@ -1,6 +1,7 @@
 // The thread environment game code needs: GS (the TEB), CPU state, thread ids.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace fl::os {
@@ -17,6 +18,9 @@ void prepare_game_thread();
 // OS ids of the calling thread and of this process.
 uint64_t thread_id();
 uint64_t process_id();
+
+// The calling thread's stack: lowest address and size.
+void current_stack(void** lo, size_t* size);
 
 // Sends signal `sig` to thread `tid` (a thread_id()) of this process.
 bool signal_thread(uint64_t tid, int sig);

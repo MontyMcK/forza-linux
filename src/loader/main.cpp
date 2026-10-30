@@ -16,6 +16,7 @@
 #include "loader/imports.h"
 #include "loader/pe_image.h"
 #include "loader/thread_env.h"
+#include "platform/os/thread.h"
 
 namespace fl {
 
@@ -78,12 +79,9 @@ void parse_args(int argc, char** argv) {
 using EntryPoint = int(WINAPI*)();
 
 void* game_main_thread(void*) {
-    pthread_attr_t attr;
     void* stack_lo;
     size_t stack_size;
-    pthread_getattr_np(pthread_self(), &attr);
-    pthread_attr_getstack(&attr, &stack_lo, &stack_size);
-    pthread_attr_destroy(&attr);
+    os::current_stack(&stack_lo, &stack_size);
 
     loader::attach_thread(stack_lo, static_cast<uint8_t*>(stack_lo) + stack_size, /*main_thread=*/true);
     auto& img = loader::main_image();

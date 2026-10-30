@@ -5,6 +5,7 @@
 #include "common/log.h"
 #include "common/winabi.h"
 #include "hle/registry.h"
+#include "platform/os/random.h"
 
 namespace fl::misc {
 namespace {
@@ -20,11 +21,7 @@ WINAPI ULONG etx_FillCommonFields(void*, void*, void*) { return 0; }
 // ---------------------------------------------------------------- bcrypt
 
 WINAPI NTSTATUS b_BCryptGenRandom(void* alg, uint8_t* buf, ULONG len, ULONG flags) {
-    ULONG done = 0;
-    while (done < len) {
-        ssize_t r = getrandom(buf + done, len - done, 0);
-        if (r > 0) done += static_cast<ULONG>(r);
-    }
+    os::random_bytes(buf, len);
     return 0;
 }
 

@@ -65,10 +65,16 @@ WINAPI LDiv c_ldiv(int32_t a, int32_t b) { return {a / b, a % b}; }
 
 using Compare = int(WINAPI*)(const void*, const void*);
 
-int qsort_tramp(const void* a, const void* b, void* fn) { return reinterpret_cast<Compare>(fn)(a, b); }
+// qsort_r's argument order differs between glibc and BSD (the PS5): the
+// game's comparator goes through a thread_local instead (sorts may nest).
+thread_local Compare t_qsort_cmp = nullptr;
+int qsort_tramp(const void* a, const void* b) { return t_qsort_cmp(a, b); }
 
 WINAPI void c_qsort(void* base, size_t n, size_t size, Compare cmp) {
-    qsort_r(base, n, size, qsort_tramp, reinterpret_cast<void*>(cmp));
+    Compare outer = t_qsort_cmp;
+    t_qsort_cmp = cmp;
+    qsort(base, n, size, qsort_tramp);
+    t_qsort_cmp = outer;
 }
 
 WINAPI void* c_bsearch(const void* key, const void* base, size_t n, size_t size, Compare cmp) {

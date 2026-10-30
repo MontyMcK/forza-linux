@@ -107,7 +107,7 @@ std::string ordinal_name(const std::string& dll, const std::string& name) {
     return name;
 }
 
-void* bind(const std::string& dll, const std::string& raw_name, bool* resolved) {
+void* bind_import(const std::string& dll, const std::string& raw_name, bool* resolved) {
     std::string name = ordinal_name(dll, raw_name);
     void* fn = hle::lookup(dll, name);
     *resolved = fn != nullptr;
@@ -141,7 +141,7 @@ int resolve_imports(PeImage& img) {
             else
                 name = img.at<char>(static_cast<uint32_t>(names[i]) + 2);  // skip Hint
             bool ok;
-            iat[i] = reinterpret_cast<uint64_t>(bind(dll, name, &ok));
+            iat[i] = reinterpret_cast<uint64_t>(bind_import(dll, name, &ok));
             dll_total++;
             if (!ok) {
                 dll_missing++;
@@ -173,7 +173,7 @@ void* resolve_dynamic(const std::string& dll, const std::string& name) {
     if (it != g_dynamic.end()) return it->second;
     if (!hle::lookup(dll, name)) return nullptr;
     bool ok;
-    void* p = bind(dll, name, &ok);
+    void* p = bind_import(dll, name, &ok);
     g_dynamic[key] = p;
     return p;
 }

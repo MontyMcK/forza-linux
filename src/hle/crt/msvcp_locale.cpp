@@ -55,8 +55,9 @@ std::recursive_mutex& locale_lock() {
 
 // ---------------------------------------------------------------- facet basics
 
-WINAPI void facet_incref(Facet* f) { std::atomic_ref<uint32_t>(f->refs).fetch_add(1); }
-WINAPI Facet* facet_decref(Facet* f) { return std::atomic_ref<uint32_t>(f->refs).fetch_sub(1) == 1 ? f : nullptr; }
+// __atomic builtins rather than std::atomic_ref (not in the PS5 SDK's libc++).
+WINAPI void facet_incref(Facet* f) { __atomic_fetch_add(&f->refs, 1u, __ATOMIC_SEQ_CST); }
+WINAPI Facet* facet_decref(Facet* f) { return __atomic_fetch_sub(&f->refs, 1u, __ATOMIC_SEQ_CST) == 1 ? f : nullptr; }
 
 // Scalar deleting destructor of a facet that owns nothing.
 WINAPI Facet* facet_delete(Facet* f, unsigned flags) {

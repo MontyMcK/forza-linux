@@ -109,12 +109,9 @@ void* thread_trampoline(void* arg) {
     t->tid = current_tid();
     register_thread(t_self);
 
-    pthread_attr_t attr;
     void* stack_lo;
     size_t stack_size;
-    pthread_getattr_np(pthread_self(), &attr);
-    pthread_attr_getstack(&attr, &stack_lo, &stack_size);
-    pthread_attr_destroy(&attr);
+    os::current_stack(&stack_lo, &stack_size);
     loader::attach_thread(stack_lo, static_cast<uint8_t*>(stack_lo) + stack_size);
 
     // Tell CreateThread our tid, then honor CREATE_SUSPENDED.
