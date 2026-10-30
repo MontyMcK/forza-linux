@@ -14,7 +14,8 @@ log="$main/research/private/nas-sync.log"
 
 if [[ ${1:-} == --background ]]; then
   mkdir -p "$(dirname "$log")"
-  nohup "$0" > "$log" 2>&1 < /dev/null &
+  echo "==== $(date '+%F %T') sync after push" >> "$log"
+  nohup "$0" >> "$log" 2>&1 < /dev/null &
   echo "nas_sync: updating the NAS copy in the background (research/private/nas-sync.log)"
   exit 0
 fi
