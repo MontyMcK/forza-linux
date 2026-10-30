@@ -116,6 +116,10 @@ static int tcp_connect(uint32_t ip, int port) {
   return -1;
 }
 
+/* With OH2_LOG_HOST/PORT (tools/ps5/ps5.env): every line also goes straight
+ * to tools/ps5/netlog.py on the PC, connected first thing in main. */
+static int net_fd = -1;
+
 static int upload_log(void) {
   char line[512];
   int c = tcp_connect(htonl(INADDR_LOOPBACK), 2121);
@@ -154,6 +158,7 @@ static void say(const char *fmt, ...) {
     fsync(log_fd);
   }
 #ifdef OH2_PROBE_TITLE
+  if (net_fd >= 0) send(net_fd, buf, n, 0);
   if (remote_len + n <= sizeof remote_log) {
     memcpy(remote_log + remote_len, buf, n);
     remote_len += n;
@@ -926,6 +931,10 @@ static void test_title_limits(void) {
 #endif
 
 int main(void) {
+#if defined(OH2_PROBE_TITLE) && defined(OH2_LOG_HOST)
+  net_fd = tcp_connect(inet_addr(OH2_LOG_HOST), OH2_LOG_PORT);
+  if (net_fd >= 0) send(net_fd, "hello from the title's main\n", 28, 0);
+#endif
   mkdir("/data/homebrew/PPSA99642/logs", 0777);
   const char *log_path = 0;
   for (unsigned i = 0; i < sizeof log_paths / sizeof *log_paths && log_fd < 0; i++) {

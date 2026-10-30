@@ -25,7 +25,9 @@ case $target in
     # The probe as the title's eboot, packaged as build-ps5/title/$PS5_TITLE_ID
     out="$ps5_root/build-ps5/probe-title"
     mkdir -p "$out"
-    "$ps5_root/tools/ps5/cc.sh" -std=gnu11 -O1 -Wall -Werror -DOH2_PROBE_TITLE \
+    netlog=()
+    [[ -n ${PS5_LOG_HOST:-} ]] && netlog=(-DOH2_LOG_HOST=\"$PS5_LOG_HOST\" -DOH2_LOG_PORT="${PS5_LOG_PORT:-9599}")
+    "$ps5_root/tools/ps5/cc.sh" -std=gnu11 -O1 -Wall -Werror -DOH2_PROBE_TITLE "${netlog[@]}" \
       -c "$ps5_root/tools/ps5/probe/oh2probe.c" -o "$out/oh2probe.o"
     "$ps5_root/tools/ps5/link_title.sh" "$out/eboot.bin" "$out/oh2probe.o"
     "$ps5_root/tools/ps5/package.sh" "$out/eboot.bin" ;;
@@ -34,6 +36,8 @@ case $target in
     mkdir -p "$out"
     "$PS5_PAYLOAD_SDK/bin/prospero-clang" -std=gnu11 -O1 -Wall -Werror -DOH2_TITLE_ID=\"$PS5_TITLE_ID\" \
       -lSceSystemService -lSceUserService -o "$out/oh2launch.elf" "$ps5_root/tools/ps5/launch/oh2launch.c"
-    echo "$out/oh2launch.elf" ;;
+    "$PS5_PAYLOAD_SDK/bin/prospero-clang" -std=gnu11 -O1 -Wall -Werror -DOH2_TITLE_ID=\"$PS5_TITLE_ID\" -DOH2_STATUS_ONLY \
+      -lSceSystemService -lSceUserService -o "$out/oh2status.elf" "$ps5_root/tools/ps5/launch/oh2launch.c"
+    echo "$out/oh2launch.elf $out/oh2status.elf" ;;
   *) echo "unknown target: $target" >&2; exit 2 ;;
 esac

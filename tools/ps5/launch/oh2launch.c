@@ -5,7 +5,8 @@
  * the launch is skipped. Then it tries the launch calls homebrew launchers use
  * (sceLncUtilLaunchApp with the foreground user, then the first logged-in
  * user, then sceSystemServiceLaunchApp) and logs each result to the title's
- * log folder.
+ * log folder. Built with OH2_STATUS_ONLY (oh2status.elf) it only logs the
+ * running app.
  * Our own code, written from the public libSceSystemService and
  * libSceUserService interfaces.
  */
@@ -65,6 +66,9 @@ int main(void) {
   char title[32] = "";
   if (running != 0 && running != 0xffffffffu) sceLncUtilGetAppTitleId(running, title);
   say("running big app: id 0x%x title '%s'", running, title);
+#ifdef OH2_STATUS_ONLY
+  return 0; /* oh2status: only report what is running */
+#endif
   if (title[0] && strcmp(title, OH2_TITLE_ID) != 0) {
     say("another app is running: not launching over it");
     return 1;

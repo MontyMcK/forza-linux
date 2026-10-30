@@ -114,7 +114,7 @@ The PS5 binary statically links PS5_Vulkan's RADV build and link recipe, and the
 
 ### Step 3: platform probe
 - [x] Payload probe (`tools/ps5/probe/oh2probe.c`): 24 pass, 2 fail (MAP_EXCL overwrite as reported; 1 GiB direct memory refused in a payload). FINDINGS §7
-- [ ] **3b: the same probe as a title** (needs Step 5's packaging; can be a minimal title linked with the SDK + PS5_Vulkan recipe): direct memory budget and 1 GiB+ allocations, flexible budget, `access()` EPERM, file map in a reservation, `/data` and `/mnt/usbN` visibility with ShadowMount+, open-file limit, CPU affinity
+- [x] **3b: the same probe as a title** (2026-10-30, FINDINGS 7.5: 28 pass, 2 fail; **a title can't see /data or USB** with SM+ 1.7beta2: decision needed, see Storage) (needs Step 5's packaging; can be a minimal title linked with the SDK + PS5_Vulkan recipe): direct memory budget and 1 GiB+ allocations, flexible budget, `access()` EPERM, file map in a reservation, `/data` and `/mnt/usbN` visibility with ShadowMount+, open-file limit, CPU affinity
 
 ### Step 4: platform layer (Linux only)
 `src/platform/os/` interfaces + Linux backend (`FL_OS=linux`), behaviour unchanged, Linux check after each move; status table in `src/platform/os/README.md`; `tests/os_test.cpp` must pass on every backend:

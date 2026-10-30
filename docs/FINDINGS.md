@@ -299,3 +299,12 @@ Measured with our probe (`tools/ps5/probe/oh2probe.c`, raw log in `research/priv
 ### 7.4 Files (payload context)
 - `access()` works in a payload (returned 0); other projects report EPERM for every path inside a title, so the platform layer uses `stat()` (recheck in the title run).
 - With no USB stick inserted, `/mnt/usb0..7` exist and are empty.
+
+### 7.5 Title context (probe as PPSA99642, 2026-10-30 20:55; log over TCP to tools/ps5/netlog.py)
+- **Sandbox:** the title sees `/app0` (its folder, read-only; `opendir` fails) and `/download0` (writable; `opendir` fails). `/data`, `/data/homebrew`, `/data/OpenHorizon2`, `/mnt/usb0`, `/mnt/usb1`, `/user`, `/system`: `stat` ENOENT. `lstat` fails with EPERM on every path, `access` with EPERM. **The dump in /data/OpenHorizon2 is not reachable from the title** with Monty's setup (ShadowMount+ 1.7beta2). prospero-win reports SM+ 1.7beta4 mounts /data into every app (stat works, lstat EPERM); MihawkOS/prospero-win use the Lapy daemon for full /data.
+- Networking: a TCP connection from the title to the PC (192.168.1.40:9599) works; a connection to ftpsrv on 127.0.0.1:2121 failed.
+- Memory: flexible 448 MiB configured / 442 MiB free; direct memory 12288 MiB, largest free block 12286 MiB. `sceKernelAllocateDirectMemory` 1, 4 and 8 GiB succeed and map RW at fixed addresses inside a 16 GiB reservation at 0x1000000000. `mmap(NULL, 4 GiB, PROT_NONE)` and `mmap(NULL, 512 MiB, RW)` are refused (ENOMEM). Reservation at 0x140000000 granted. MAP_FIXED|MAP_EXCL still replaces.
+- libc `malloc` returns NULL after **13 MiB** (1 MiB blocks): the runtime needs its own heap over direct memory.
+- **250** files open by path before EMFILE.
+- MXCSR at `main` is 0x1f80 (PS5_Vulkan's app CRT sets the IEEE state); default thread stack 64 KiB; 16 CPUs reported.
+- Signals, GS base, umtx, exec via sceKernelMprotect, 16 KiB pages: as in the payload (7.2, 7.3); write fault + mprotect ~35 us.
