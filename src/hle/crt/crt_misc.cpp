@@ -12,6 +12,7 @@
 #include "common/log.h"
 #include "common/winabi.h"
 #include "hle/registry.h"
+#include "hle/game_heap.h"
 
 namespace fl::crt {
 
@@ -23,16 +24,17 @@ using errno_t = int;
 
 // ---------------------------------------------------------------- heap
 
-WINAPI void* c_malloc(size_t n) { return malloc(n ? n : 1); }
-WINAPI void* c_calloc(size_t n, size_t s) { return calloc(n ? n : 1, s ? s : 1); }
-WINAPI void* c_realloc(void* p, size_t n) {
-    if (n == 0) {
-        free(p);
-        return nullptr;
-    }
-    return realloc(p, n);
+WINAPI void* c_malloc(size_t n) { return heap::alloc(n, false); }
+WINAPI void* c_calloc(size_t n, size_t s) {
+    n = n ? n : 1;
+    s = s ? s : 1;
+    if (s > SIZE_MAX / n) return nullptr;
+    return heap::alloc(n * s, true);
 }
-WINAPI void c_free(void* p) { free(p); }
+WINAPI void* c_realloc(void* p, size_t n) {
+    return heap::realloc(p, n);
+}
+WINAPI void c_free(void* p) { heap::free(p); }
 
 // ---------------------------------------------------------------- math
 

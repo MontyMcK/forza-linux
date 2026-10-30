@@ -99,7 +99,8 @@ target_link_libraries(gcn_layout_test PRIVATE addrlib pthread fl_os)
 add_executable(os_test tests/os_test.cpp)
 target_link_libraries(os_test PRIVATE fl_os)
 
-add_executable(concrt_token_test tests/concrt_token_test.cpp src/hle/crt/concrt.cpp src/hle/registry.cpp src/common/log.cpp)
+add_executable(concrt_token_test tests/concrt_token_test.cpp src/hle/crt/concrt.cpp src/hle/game_heap.cpp src/hle/registry.cpp
+               src/common/log.cpp)
 target_include_directories(concrt_token_test PRIVATE src)
 target_link_libraries(concrt_token_test PRIVATE pthread fl_os)
 

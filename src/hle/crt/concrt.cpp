@@ -22,6 +22,7 @@
 #include "hle/kernelx/kobject.h"
 #include "hle/registry.h"
 #include "hle/seh/seh.h"
+#include "hle/game_heap.h"
 
 namespace fl::crt {
 namespace {
@@ -106,8 +107,8 @@ WINAPI void spin_dtor(SpinLock* self) { self->flag->store(0, std::memory_order_r
 
 // ---------------------------------------------------------------- allocation
 
-WINAPI void* cc_alloc(size_t n) { return malloc(n ? n : 1); }
-WINAPI void cc_free(void* p) { free(p); }
+WINAPI void* cc_alloc(size_t n) { return heap::alloc(n, false); }
+WINAPI void cc_free(void* p) { heap::free(p); }
 
 // ---------------------------------------------------------------- scheduler
 

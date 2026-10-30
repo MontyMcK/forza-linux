@@ -13,6 +13,7 @@
 #include "hle/kernelx/kobject.h"
 #include "hle/registry.h"
 #include "platform/os/memory.h"
+#include "hle/game_heap.h"
 
 namespace fl::kx {
 namespace {
@@ -63,6 +64,17 @@ WINAPI void* kx_VirtualAlloc(void* addr, SIZE_T size, DWORD type, DWORD protect)
 
     // Align to 64 KB like Windows' allocation granularity.
     void* p = os::map_anon(addr, size, prot, 0x10000);
+    if (!p && addr) {
+        // The host can't give this exact range: the PS5 grants a title nothing
+        // above 1 TiB and already uses some low ranges the Xbox leaves free
+        // (FINDINGS 7.7). Place it elsewhere and return the real base, which
+        // is what the game works from.
+        int err = errno;
+        p = os::map_anon(nullptr, size, prot, 0x10000);
+        if (p)
+            log_write("memory", "VirtualAlloc(%p, 0x%llx): that range isn't available here (%s), placed at %p", addr,
+                      (unsigned long long)size, strerror(err), p);
+    }
     if (!p) {
         FL_ERROR("VirtualAlloc(%p, 0x%llx, 0x%x, 0x%x) failed: %s", addr, (unsigned long long)size, type, protect,
                  strerror(errno));
@@ -108,14 +120,14 @@ constexpr DWORD HEAP_ZERO_MEMORY = 0x8;
 WINAPI HANDLE kx_GetProcessHeap() { return kProcessHeap; }
 
 WINAPI void* kx_HeapAlloc(HANDLE heap, DWORD flags, SIZE_T size) {
-    void* p = (flags & HEAP_ZERO_MEMORY) ? calloc(1, size ? size : 1) : malloc(size ? size : 1);
+    void* p = fl::heap::alloc(size, (flags & HEAP_ZERO_MEMORY) != 0);
     if (!p) set_last_error(ERROR_NOT_ENOUGH_MEMORY);
     if (size >= 0x10000) FL_LOG(memory, "HeapAlloc(0x%llx) -> %p", (unsigned long long)size, p);
     return p;
 }
 
 WINAPI BOOL kx_HeapFree(HANDLE heap, DWORD flags, void* p) {
-    free(p);
+    fl::heap::free(p);
     return TRUE_;
 }
 

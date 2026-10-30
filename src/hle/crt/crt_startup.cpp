@@ -11,6 +11,7 @@
 #include "common/winabi.h"
 #include "hle/registry.h"
 #include "platform/os/process.h"
+#include "hle/game_heap.h"
 
 namespace fl::crt {
 namespace {
@@ -150,7 +151,7 @@ std::recursive_mutex g_crt_locks[64];
 
 WINAPI void c_lock(int n) { g_crt_locks[n & 63].lock(); }
 WINAPI void c_unlock(int n) { g_crt_locks[n & 63].unlock(); }
-WINAPI void* c_calloc_crt(size_t n, size_t size) { return calloc(n, size); }
+WINAPI void* c_calloc_crt(size_t n, size_t size) { return size && n > SIZE_MAX / size ? nullptr : heap::alloc(n * size, true); }
 
 }  // namespace
 

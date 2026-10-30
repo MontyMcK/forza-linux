@@ -70,6 +70,30 @@ size_t accessible(const void* p, size_t n, uint32_t need) {
     return ok - a;
 }
 
+// Where reservations without an address go: from 64 GiB up to the 1 TiB a
+// title may use (16 GiB ranges land exactly at their hint there, FINDINGS
+// 7.2). Left to itself the kernel fills the low areas, including the GPU
+// window (0x2_0000_0000-0x2_FFFF_FFFF) and ranges the game asks for by
+// address.
+constexpr uint64_t kAnywhereLo = 0x1000000000ull, kAnywhereHi = 0x10000000000ull;
+std::atomic<uint64_t> g_next_anywhere{kAnywhereLo};
+
+void* reserve_anywhere(size_t size, size_t align) {
+    align = std::max(align, kUnit);
+    for (uint64_t hint = round_up(g_next_anywhere.load(), align); hint + size <= kAnywhereHi;) {
+        void* a = reinterpret_cast<void*>(hint);
+        if (sceKernelReserveVirtualRange(&a, size, 0, align) != 0) return nullptr;
+        uint64_t got = reinterpret_cast<uint64_t>(a);
+        if (got >= kAnywhereLo && got + size <= kAnywhereHi) {
+            g_next_anywhere = got + size;
+            return a;
+        }
+        sceKernelMunmap(a, size);  // landed low: try further up
+        hint += std::max<uint64_t>(size, 1ull << 30);
+    }
+    return nullptr;
+}
+
 }  // namespace
 
 size_t page_size() { return kPage; }
@@ -78,7 +102,13 @@ void* map_anon(void* want, size_t size, unsigned prot, size_t align) {
     // Whole units, so two reservations never share one (commit() backs units).
     size = round_up(size ? size : 1, kUnit);
     void* a = want;
-    if (sceKernelReserveVirtualRange(&a, size, 0, want ? kPage : std::max(align, kUnit)) != 0) {
+    if (!want) {
+        a = reserve_anywhere(size, align);
+        if (!a) {
+            errno = ENOMEM;
+            return nullptr;
+        }
+    } else if (sceKernelReserveVirtualRange(&a, size, 0, kPage) != 0) {
         errno = ENOMEM;
         return nullptr;
     }
