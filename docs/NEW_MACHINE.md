@@ -47,4 +47,4 @@ pip install --user pefile capstone
 - Don't start a test instance while Monty plays their own (it tanks their frame rate); Monty watches test windows, so say first when a run is a deliberate old/unfixed build.
 - Ask before sudo, deleting anything, uploading the dump, or new-licence dependencies. Short, plain replies.
 - PS5: Monty runs the jailbreak (and elfldr) after each restart; all tests that need a person go to Monty as a TEST CARD. Never play, watch or judge gameplay yourself.
-- The PS5 title is `PPSA99642` in `/data/homebrew/PPSA99642` (ShadowMount+). Redeploy only with `tools/ps5/upload_title.sh` (atomic: a missing eboot.bin makes ShadowMount+ drop the title until a console restart).
+- The PS5 title is `PPSA99642` in `/data/homebrew/PPSA99642` (ShadowMount+, **1.7beta4 or newer**: older versions don't mount `/data` and USB into titles, and the title then can't see the dump). Redeploy only with `tools/ps5/upload_title.sh` (atomic: a missing eboot.bin makes ShadowMount+ drop the title until a console restart).

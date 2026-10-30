@@ -30,6 +30,14 @@ python3 launcher/forza_launcher.py --print-command     # show what Play would ru
 
 Settings live in `~/.config/forza-linux/launcher.json`. The launcher shows art from your own game folder. The desktop icon is made from your game's logo and is written only to `~/.local/share/icons`. Neither is part of this repository.
 
+## PS5 (work in progress)
+
+A native homebrew title for jailbroken PS5 consoles is being built on the `ps5-test` branch: `docs/PS5_PORT.md` has the plan and its status. It doesn't run the game yet. What a console will need:
+
+- A jailbroken PS5 with **[ShadowMount+](https://github.com/drakmor/ShadowMountPlus) 1.7beta4 or newer** (1.7beta11 recommended). Earlier versions don't give titles access to `/data` or USB drives, so Open Horizon 2 can't see your game files: a homebrew title can otherwise only read its own folder.
+- An ELF loader on port 9021 ([elfldr](https://github.com/ps5-payload-dev/elfldr)) and an FTP server on port 2121 ([ftpsrv](https://github.com/ps5-payload-dev/ftpsrv)) for development.
+- Your own dump of the game on the console's internal storage (for example `/data/OpenHorizon2/<folder>/Mount`) or on an exFAT/FAT32 USB drive with an MBR partition table (the PS5 can't see GPT drives). No game files ship with the title.
+
 ## License
 
 Open Horizon 2 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See [LICENSE](LICENSE) for the full text.
