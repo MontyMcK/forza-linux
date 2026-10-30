@@ -10,6 +10,9 @@
 #include "platform/os/files.h"
 #include "platform/os/futex.h"
 #include "platform/os/memory.h"
+#include "platform/os/thread.h"
+
+#include <csignal>
 
 using namespace fl;
 using clk = std::chrono::steady_clock;
@@ -83,6 +86,47 @@ int main() {
     check(ok && reinterpret_cast<int (*)()>(code)() == 42, "protect adds execute to written code");
     os::release(code, page);
     check(os::resident_bytes() > 0, "resident_bytes");
+
+    // Checked copies stop at memory they can't access.
+    auto* two = static_cast<uint8_t*>(os::map_anon(nullptr, 2 * page, os::kRead | os::kWrite));
+    std::memset(two, 0x11, page);
+    os::protect(two + page, page, os::kNone);
+    static uint8_t buf[1 << 16];
+    check(os::read_checked(buf, two + page - 64, 128) == 64 && buf[0] == 0x11, "read_checked stops at a no-access page");
+    check(os::read_checked(buf, two + page, 16) == 0, "read_checked of a no-access page copies nothing");
+    os::protect(two, page, os::kRead);
+    check(os::write_checked(two, buf, 16) == 0 && two[0] == 0x11, "write_checked into a read-only page writes nothing");
+    os::release(two, 2 * page);
+
+    // Thread environment.
+    static uint64_t teb_block[4] = {0x7eb};
+    uint64_t gs0 = 0;
+    bool gs_ok = os::set_gs_base(teb_block);
+    if (gs_ok) __asm__ volatile("movq %%gs:0, %0" : "=r"(gs0));
+    os::set_gs_base(nullptr);
+    check(gs_ok && gs0 == 0x7eb, "set_gs_base: gs:0 reads the block");
+    os::prepare_game_thread();
+    unsigned mxcsr;
+    __asm__ volatile("stmxcsr %0" : "=m"(mxcsr));
+    check((mxcsr & 0xffc0) == 0x1f80, "prepare_game_thread leaves the Windows MXCSR (0x1f80)");
+
+    static std::atomic<int> got_signal{0};
+    struct sigaction sa = {};
+    sa.sa_handler = [](int) { got_signal = 1; };
+    sigaction(SIGUSR2, &sa, nullptr);
+    std::atomic<uint64_t> other_tid{0};
+    std::atomic<bool> stop{false};
+    std::thread t2([&] {
+        other_tid = os::thread_id();
+        while (!stop) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    });
+    while (!other_tid) std::this_thread::yield();
+    bool sent = os::signal_thread(other_tid, SIGUSR2);
+    for (int i = 0; i < 1000 && !got_signal; i++) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    stop = true;
+    t2.join();
+    check(other_tid != os::thread_id() && os::process_id() != 0, "thread ids differ between threads");
+    check(sent && got_signal, "signal_thread delivers to that thread");
 
     std::printf("%s\n", failures ? "FAILED" : "all passed");
     return failures ? 1 : 0;

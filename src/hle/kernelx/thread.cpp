@@ -16,6 +16,7 @@
 #include "hle/registry.h"
 #include "loader/thread_env.h"
 #include "platform/os/memory.h"
+#include "platform/os/thread.h"
 
 extern "C" void fl_fiber_switch(uint64_t* save_rsp, uint64_t new_rsp);
 extern "C" void fl_fiber_entry();
@@ -205,7 +206,7 @@ WINAPI DWORD kx_SuspendThread(HANDLE h) {
             std::lock_guard lock(wait_lock());
             exited = t->exited;
         }
-        if (!exited && syscall(SYS_tgkill, getpid(), t->tid.load(), kSuspendSignal) == 0)
+        if (!exited && os::signal_thread(t->tid.load(), kSuspendSignal))
             while (!t->parked.load() && t->suspend_count.load() > 0) futex_wait(&t->parked, 0);
     }
     return static_cast<DWORD>(prev);

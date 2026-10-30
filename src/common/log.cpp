@@ -1,4 +1,5 @@
 #include "common/log.h"
+#include "platform/os/thread.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -28,7 +29,7 @@ void vwrite(const char* channel, const char* fmt, va_list ap) {
     char msg[2048];
     vsnprintf(msg, sizeof msg, fmt, ap);
     std::lock_guard lock(g_mutex);
-    long tid = syscall(SYS_gettid);
+    long tid = static_cast<long>(os::thread_id());
     fprintf(stderr, "[%9.4f %6ld %-8s] %s\n", elapsed(), tid, channel, msg);
     if (g_file) {
         fprintf(g_file, "[%9.4f %6ld %-8s] %s\n", elapsed(), tid, channel, msg);

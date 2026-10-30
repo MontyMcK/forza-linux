@@ -1,14 +1,12 @@
 #include "loader/thread_env.h"
 
-#include <asm/prctl.h>
 #include <cstdlib>
 #include <cstring>
-#include <sys/syscall.h>
-#include <unistd.h>
 
 #include "common/log.h"
 #include "loader/pe_image.h"
 #include "loader/pe_structs.h"
+#include "platform/os/thread.h"
 
 namespace fl::loader {
 namespace {
@@ -63,8 +61,8 @@ Teb* attach_thread(void* stack_lo, void* stack_hi, bool main_thread) {
     teb->field<void*>(teb_off::StackLimit) = stack_lo;
     teb->field<void*>(teb_off::DeallocationStack) = stack_lo;
     teb->field<void*>(teb_off::Self) = teb;
-    teb->field<uint64_t>(teb_off::ClientIdProcess) = static_cast<uint64_t>(getpid());
-    teb->field<uint64_t>(teb_off::ClientIdThread) = static_cast<uint64_t>(syscall(SYS_gettid));
+    teb->field<uint64_t>(teb_off::ClientIdProcess) = os::process_id();
+    teb->field<uint64_t>(teb_off::ClientIdThread) = os::thread_id();
     teb->field<void*>(teb_off::Peb) = g_peb;
 
     if (g_tls) {
@@ -77,7 +75,8 @@ Teb* attach_thread(void* stack_lo, void* stack_hi, bool main_thread) {
         teb->field<void**>(teb_off::ThreadLocalStoragePointer) = slots;
     }
 
-    if (syscall(SYS_arch_prctl, ARCH_SET_GS, teb) != 0) fatal("arch_prctl(ARCH_SET_GS) failed");
+    if (!os::set_gs_base(teb)) fatal("setting the GS base failed");
+    os::prepare_game_thread();
     t_teb = teb;
     FL_LOG(loader, "thread attached: teb %p stack %p-%p", static_cast<void*>(teb), stack_lo, stack_hi);
     run_tls_callbacks(main_thread ? 1 /* DLL_PROCESS_ATTACH */ : 2 /* DLL_THREAD_ATTACH */);
@@ -92,7 +91,7 @@ void detach_thread() {
         free(slots[0]);
         free(slots);
     }
-    syscall(SYS_arch_prctl, ARCH_SET_GS, nullptr);
+    os::set_gs_base(nullptr);
     t_teb = nullptr;
     free(teb);
 }

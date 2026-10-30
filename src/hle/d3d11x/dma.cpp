@@ -14,6 +14,7 @@
 #include "hle/d3d11x/d3d11x.h"
 #include "hle/d3d11x/dxvk.h"
 #include "hle/d3d11x/trace.h"
+#include "platform/os/memory.h"
 
 namespace fl::d3d {
 namespace {
@@ -94,14 +95,11 @@ WINAPI HRESULT dma_Kickoff(Iface* self) {
     FL_LOG(fence, "dma %p Kickoff", (void*)self);
     return S_OK;
 }
-// Writes go through process_vm_writev so a destination the CPU never committed
-// (GPU-only graphics memory reserved with the Xbox type bit 0x40000000, whose
-// contents live in DXVK for us) is skipped instead of faulting.
+// Writes are checked so a destination the CPU never committed (GPU-only
+// graphics memory reserved with the Xbox type bit 0x40000000, whose contents
+// live in DXVK for us) is skipped instead of faulting.
 bool dma_write(uint64_t dst, const void* src, size_t n) {
-    iovec local{const_cast<void*>(src), n};
-    iovec remote{reinterpret_cast<void*>(dst), n};
-    ssize_t w = process_vm_writev(getpid(), &local, 1, &remote, 1, 0);
-    if (w == static_cast<ssize_t>(n)) return true;
+    if (os::write_checked(reinterpret_cast<void*>(dst), src, n) == n) return true;
     FL_STUB_ONCE("DMA: write into memory the CPU cannot write (GPU-only, not committed): skipped");
     return false;
 }
@@ -115,9 +113,7 @@ WINAPI void dma_CopyMemoryToMemory(Iface*, uint64_t dst, uint64_t src, uint64_t 
     std::vector<uint8_t> tmp(std::min<uint64_t>(bytes, 1 << 20));
     for (uint64_t off = 0; off < bytes; off += tmp.size()) {
         size_t n = static_cast<size_t>(std::min<uint64_t>(tmp.size(), bytes - off));
-        iovec local{tmp.data(), n};
-        iovec remote{reinterpret_cast<void*>(src + off), n};
-        if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) != static_cast<ssize_t>(n)) {
+        if (os::read_checked(tmp.data(), reinterpret_cast<void*>(src + off), n) != n) {
             FL_STUB_ONCE("DMA: copy from memory the CPU cannot read (GPU-only): skipped");
             return;
         }
@@ -215,9 +211,7 @@ WINAPI HRESULT dma_LZDecompressMemory(Iface* self, uint64_t dst, uint64_t src, U
     if (flags) log_once("DMA LZDecompressMemory: unknown flags", flags);
     if (!src_bytes) return 0x80070057;  // E_INVALIDARG, as umd
     std::vector<uint8_t> in(src_bytes);
-    iovec local{in.data(), in.size()};
-    iovec remote{reinterpret_cast<void*>(src), in.size()};
-    if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) != static_cast<ssize_t>(in.size())) {
+    if (os::read_checked(in.data(), reinterpret_cast<void*>(src), in.size()) != in.size()) {
         FL_ERROR("DMA LZDecompressMemory: source %p+0x%x is not readable", reinterpret_cast<void*>(src), src_bytes);
         dma_of(self)->status = 0x8007000D;
         return S_OK;

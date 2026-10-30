@@ -6,6 +6,7 @@
 #include <unordered_map>
 
 #include "loader/thread_env.h"
+#include "platform/os/thread.h"
 
 namespace fl::kx {
 namespace {
@@ -46,7 +47,7 @@ bool handle_close(HANDLE h) {
 }
 
 DWORD current_tid() {
-    static thread_local DWORD tid = static_cast<DWORD>(syscall(SYS_gettid));
+    static thread_local DWORD tid = static_cast<DWORD>(os::thread_id());
     return tid;
 }
 

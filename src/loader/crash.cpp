@@ -25,6 +25,7 @@
 #include "hle/seh/seh.h"
 #include "loader/thread_env.h"
 #include "platform/os/memory.h"
+#include "platform/os/thread.h"
 
 namespace fl::loader {
 namespace {
@@ -261,15 +262,13 @@ void dump_handler(int, siginfo_t*, void* uc_) {
         int k = seh::walk_stack(c, pcs, 16);
         for (int i = 0; i < k; i++) dump_append(n, "    #%d game rva 0x%llx\n", i, (unsigned long long)(pcs[i] - base));
     } else {
-        // Copy the stack with process_vm_readv: it stops at the end of the
+        // Copy the stack with a checked read: it stops at the end of the
         // mapping instead of faulting (thread stacks can be small).
         static uint64_t sp[2048];
         size_t words = 0;
         for (size_t off = 0; off < sizeof sp; off += 4096) {
-            iovec local{reinterpret_cast<char*>(sp) + off, 4096};
-            iovec remote{reinterpret_cast<void*>(g[REG_RSP] + off), 4096};
-            ssize_t r = process_vm_readv(getpid(), &local, 1, &remote, 1, 0);
-            if (r > 0) words += size_t(r) / 8;
+            size_t r = os::read_checked(reinterpret_cast<char*>(sp) + off, reinterpret_cast<void*>(g[REG_RSP] + off), 4096);
+            words += r / 8;
             if (r != 4096) break;
         }
         int game = 0, native = 0;
@@ -293,7 +292,7 @@ void dump_handler(int, siginfo_t*, void* uc_) {
 }
 
 void dump_threads() {
-    pid_t self = static_cast<pid_t>(syscall(SYS_gettid));
+    pid_t self = static_cast<pid_t>(os::thread_id());
     DIR* dir = opendir("/proc/self/task");
     if (!dir) return;
     fl::log_write("threads", "==== thread dump");
@@ -322,7 +321,7 @@ void dump_threads() {
         }
         g_dump_done = 0;
         g_dump_buf[0] = 0;
-        syscall(SYS_tgkill, getpid(), tid, kDumpSignal);
+        os::signal_thread(tid, kDumpSignal);
         for (int i = 0; i < 200 && !g_dump_done.load(std::memory_order_acquire); i++) usleep(1000);
         fl::log_write("threads", "thread %d (%s) cpu %.2fs %s", tid, comm, cpu,
                       g_dump_done ? g_dump_buf : "did not answer\n");

@@ -17,6 +17,7 @@
 
 #include "common/log.h"
 #include "loader/pe_image.h"
+#include "platform/os/thread.h"
 
 namespace fl::loader {
 namespace {
@@ -39,7 +40,7 @@ void on_prof(int, siginfo_t*, void* uc) {
     const greg_t* g = static_cast<ucontext_t*>(uc)->uc_mcontext.gregs;
     g_samples[i].rip = g[REG_RIP];
     g_samples[i].ret = *reinterpret_cast<const uint64_t*>(g[REG_RSP]);
-    g_samples[i].tid = static_cast<uint32_t>(syscall(SYS_gettid));
+    g_samples[i].tid = static_cast<uint32_t>(os::thread_id());
     errno = saved;
 }
 

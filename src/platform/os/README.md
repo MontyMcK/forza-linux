@@ -10,10 +10,12 @@ call the OS directly for anything listed below.
 | Futex wait/wake | futex.h | `SYS_futex` (private) | `_umtx_op` WAIT_UINT_PRIVATE / WAKE_PRIVATE | yes |
 | File existence | files.h | `stat` | `stat` (never `access`: EPERM in a title) | yes |
 | Memory: reserve, commit, protect, exec, page size | memory.h | mmap / mprotect | ReserveVirtualRange, direct memory, sceKernelMprotect | yes |
-| Thread environment (GS = TEB) | | `arch_prctl(ARCH_SET_GS)` | `sysarch(AMD64_SET_GSBASE)` | no |
+| Thread environment: GS (TEB), game-thread CPU state, thread ids, signal a thread | thread.h | `arch_prctl(ARCH_SET_GS)`, `gettid`, `tgkill` | `sysarch(AMD64_SET_GSBASE)`, MXCSR 0x1f80, `thr_self`, `thr_kill` | yes |
+| Checked copies (never fault) | memory.h | `process_vm_readv/writev` on ourselves | a fault-guarded copy (no process_vm_*) | yes |
 | Signal context access | | `ucontext_t` / `REG_*` | mcontext at +64, FXSAVE at +320 | no |
 | Window / present | | SDL3 | VK_KHR_display on VideoOut | no |
 | Input | | SDL3 gamepad | ScePad | no |
 | Controller output (rumble, triggers) | | SDL3 | ScePad | no |
 | Audio out | | SDL3 audio stream | SceAudioOut | no |
-| GPU write tracking | | userfaultfd + PAGEMAP_SCAN | mprotect + SIGSEGV | no |
+| GPU write tracking (incl. gpumem's `mapped`/`readable` page probes) | | userfaultfd + PAGEMAP_SCAN, `msync`, `process_vm_readv` | mprotect + SIGSEGV | no |
+| Crash/debug reports: thread list, signal stacks | | `/proc/self/task`, `sigaltstack` | (to find) | no |

@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <sys/mman.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 namespace fl::os {
@@ -56,6 +57,20 @@ bool decommit(void* addr, size_t size) {
 void release(void* addr, size_t size) { munmap(addr, size); }
 
 bool protect(void* addr, size_t size, unsigned prot) { return mprotect(addr, size, to_prot(prot)) == 0; }
+
+// process_vm_readv/writev on ourselves: the kernel stops at the first page it
+// can't access and returns what it copied, instead of raising SIGSEGV.
+size_t read_checked(void* dst, const void* src, size_t n) {
+    iovec local{dst, n}, remote{const_cast<void*>(src), n};
+    ssize_t r = process_vm_readv(getpid(), &local, 1, &remote, 1, 0);
+    return r > 0 ? static_cast<size_t>(r) : 0;
+}
+
+size_t write_checked(void* dst, const void* src, size_t n) {
+    iovec local{const_cast<void*>(src), n}, remote{dst, n};
+    ssize_t r = process_vm_writev(getpid(), &local, 1, &remote, 1, 0);
+    return r > 0 ? static_cast<size_t>(r) : 0;
+}
 
 uint64_t resident_bytes() {
     FILE* f = fopen("/proc/self/statm", "r");

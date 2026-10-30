@@ -122,7 +122,7 @@ The PS5 binary statically links PS5_Vulkan's RADV build and link recipe, and the
 - [x] futex (`os/futex.h`; futex_lock.h and concrt's timed wait use it)
 - [x] file existence (`os/files.h`; vfs uses it)
 - [x] memory: reserve, commit, protect, exec, page size (`os/memory.h`; VirtualAlloc/Free, XMem, TitleMemoryStatus, the PE loader with per-host-page union of section protections, fiber stacks, EH metadata, thunk arena, APU heaps, ESRAM, debugger pages; 4 KiB masks now use `page_size()`)
-- [ ] thread environment (GS/TEB)
+- [x] thread environment (`os/thread.h`: GS/TEB, `prepare_game_thread` for the PS5's MXCSR, thread/process ids, signal a thread) and checked copies (`os/memory.h` `read_checked`/`write_checked`, used by DMA and the crash dump)
 - [ ] signal context access
 - [ ] window/present
 - [ ] input

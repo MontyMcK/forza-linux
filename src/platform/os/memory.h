@@ -35,6 +35,12 @@ void release(void* addr, size_t size);
 // execute at map time).
 bool protect(void* addr, size_t size, unsigned prot);
 
+// memcpy that stops instead of faulting: read_checked() stops at the first byte
+// of `src` it can't read, write_checked() at the first byte of `dst` it can't
+// write (memory never committed, GPU-only ranges). Return the bytes copied.
+size_t read_checked(void* dst, const void* src, size_t n);
+size_t write_checked(void* dst, const void* src, size_t n);
+
 // This process's resident memory in bytes, or 0 if the host can't say.
 uint64_t resident_bytes();
 
