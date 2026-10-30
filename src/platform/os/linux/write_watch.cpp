@@ -127,4 +127,6 @@ bool pages_readable(uint64_t start, uint64_t end) {
     return true;
 }
 
+size_t write_watch_compare_below() { return 0; }
+
 }  // namespace fl::os

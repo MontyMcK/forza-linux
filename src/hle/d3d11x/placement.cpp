@@ -17,7 +17,9 @@
 #include "hle/d3d11x/gpumem.h"
 #include "hle/registry.h"
 #include "hle/xg/xg.h"
+#include "platform/os/clock.h"
 #include "platform/os/memory.h"
+#include "platform/os/write_watch.h"
 
 #include <map>
 #include <mutex>
@@ -98,6 +100,15 @@ Resource* find_identical(int dim, const uint32_t* xd, size_t xd_size, UINT tile_
     return r;
 }
 
+// Buffers smaller than this are compared with their last upload instead of
+// watched for writes (os::write_watch_compare_below); FL_COMPARE_BELOW=<bytes>
+// sets it, e.g. to test compare mode on Linux.
+size_t compare_below() {
+    static const size_t n = getenv("FL_COMPARE_BELOW") ? strtoull(getenv("FL_COMPARE_BELOW"), nullptr, 0)
+                                                        : os::write_watch_compare_below();
+    return n;
+}
+
 HRESULT create_placement(Iface* self, int dim, const uint32_t* xd, UINT tile_mode, UINT pitch, void* addr,
                          void** out) {
     size_t xd_size = dim == 1 ? 0x20 : dim == 2 ? 0x28 : dim == 3 ? 0x34 : 0x2c;  // Xbox descriptor sizes (resources.cpp)
@@ -116,7 +127,11 @@ HRESULT create_placement(Iface* self, int dim, const uint32_t* xd, UINT tile_mod
     r->gpu_owned = (bind & kGpuWriteBinds) != 0;
     if (dim == 1) {
         r->place_size = r->place_total = xd[0];  // ByteWidth
-        if (!r->gpu_owned) gpumem::track(r->place, r->place_size), page_index_add(r);
+        r->compare = !r->gpu_owned && r->place_size < compare_below();
+        if (!r->gpu_owned) {
+            if (!r->compare) gpumem::track(r->place, r->place_size);
+            page_index_add(r);  // compared ones too: the remap hook finds them through it
+        }
     } else {
         // The same layout our xg_x hands the game, so texels are where it put them.
         xg::TexDesc t{};
@@ -271,11 +286,7 @@ bool frame_scan_on() {
     static const bool on = getenv("FL_NO_FRAME_SCAN") == nullptr;
     return on;
 }
-int64_t now_ns() {
-    timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1'000'000'000LL + ts.tv_nsec;
-}
+int64_t now_ns() { return static_cast<int64_t>(os::monotonic_ns()); }
 struct Span {  // adds the time until it goes out of scope to a counter (FL_LOG=fps only)
     std::atomic<uint64_t>* c;
     int64_t t0;
@@ -305,6 +316,31 @@ std::string placement_stats() {
     return buf;
 }
 
+// A compared buffer (Resource::compare): uploaded when its memory differs
+// from the last upload, from the copy it was compared with.
+void sync_compared(void* dxvk_ctx, Resource* r, bool stats) {
+    int64_t t0 = stats ? now_ns() : 0;
+    auto guard = gpumem::read_guard();
+    if (r->remapped.exchange(false, std::memory_order_relaxed) && !gpumem::mapped(r->place, r->place_size)) {
+        r->remapped.store(true, std::memory_order_relaxed);  // check again next time
+        log_once("placement resource bound over released memory (not uploaded)", 0);
+        return;
+    }
+    std::lock_guard lock(r->shadow_mutex);
+    bool forced = r->force_dirty.exchange(false, std::memory_order_relaxed);
+    bool same = !forced && r->shadow.size() == r->place_size && !memcmp(r->shadow.data(), r->place, r->place_size);
+    if (stats) {
+        g_bytes_scanned.fetch_add(r->place_size, std::memory_order_relaxed);
+        g_scan_ns.fetch_add(now_ns() - t0, std::memory_order_relaxed);
+    }
+    if (same) return;
+    r->shadow.assign(r->place, r->place + r->place_size);
+    g_uploads.fetch_add(1, std::memory_order_relaxed);
+    g_upload_bytes.fetch_add(r->place_size, std::memory_order_relaxed);
+    Span t(&g_update_ns, stats);
+    dx<void>(dxvk_ctx, dc::UpdateSubresource, r->dxvk, 0u, nullptr, static_cast<const void*>(r->shadow.data()), 0u, 0u);
+}
+
 void sync_placement(void* dxvk_ctx, Resource* r) {
     if (r->gpu_owned || !r->place_size) return;
     static const bool stats = log_enabled("fps");
@@ -322,6 +358,7 @@ void sync_placement(void* dxvk_ctx, Resource* r) {
     // placement resources) un-uploaded.
     static const char* skip = getenv("FL_NO_PLACEMENT_UPLOAD");
     if (skip && (r->dim != 1 || skip[0] == 'a')) return;
+    if (r->compare) return sync_compared(dxvk_ctx, r, stats);
     // FL_CHECK_TRACKING=1 (diagnostic): verify "clean" answers against a hash
     // of what we uploaded last time.
     static const bool check = getenv("FL_CHECK_TRACKING") != nullptr;
@@ -442,6 +479,7 @@ void on_memory_remapped(uint64_t start, uint64_t end) {
         if (it == g_page_users.end()) continue;
         for (Resource* o : it->second) {
             o->force_dirty.store(true, std::memory_order_relaxed);
+            o->remapped.store(true, std::memory_order_relaxed);
             o->written_epoch.store(e, std::memory_order_relaxed);
         }
     }

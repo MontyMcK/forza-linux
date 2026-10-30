@@ -38,6 +38,11 @@ bool write_watch_on_fault(uint64_t addr, bool write);
 // faulting. Linux: nothing to do.
 void write_watch_before_kernel_write(void* addr, size_t size);
 
+// Placement buffers smaller than this are compared with their last upload at
+// each use instead of watched: 0 where watching is nearly free (Linux), more
+// where every protection change is a slow system call (PS5, ~28 us).
+size_t write_watch_compare_below();
+
 // False if a page of [start, end) is unmapped / can't be read (reserved but
 // never committed).
 bool pages_mapped(uint64_t start, uint64_t end);

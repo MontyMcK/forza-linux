@@ -1,4 +1,5 @@
 #include "common/log.h"
+#include "platform/os/clock.h"
 #include "platform/os/thread.h"
 
 #include <fcntl.h>
@@ -25,9 +26,8 @@ std::string g_pending;     // lines not in the file yet
 timespec g_start;
 
 double elapsed() {
-    timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    return (now.tv_sec - g_start.tv_sec) + (now.tv_nsec - g_start.tv_nsec) / 1e9;
+    uint64_t start = uint64_t(g_start.tv_sec) * 1'000'000'000ull + uint64_t(g_start.tv_nsec);
+    return double(os::monotonic_ns() - start) / 1e9;
 }
 
 // The log file gets lines in batches (every 200 ms, and at once after an

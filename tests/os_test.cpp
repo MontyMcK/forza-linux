@@ -18,6 +18,8 @@
 #include "platform/os/write_watch.h"
 
 #include <csignal>
+#include <ctime>
+#include <shared_mutex>
 
 using namespace fl;
 using clk = std::chrono::steady_clock;
@@ -35,6 +37,45 @@ static void check(bool ok, const char* what) {
     say((std::string(ok ? "PASS  " : "FAIL  ") + what).c_str());
     if (!ok) failures++;
 }
+static thread_local int t_counter;  // for the thread_local cost below
+
+// Costs that decide host-specific policy (FINDINGS 7.13), printed, not checked.
+static void report_costs(size_t page) {
+    char line[160];
+    auto per = [](clk::time_point t0, int n) { return std::chrono::duration<double, std::nano>(clk::now() - t0).count() / n; };
+    timespec ts;
+    auto t0 = clk::now();
+    for (int i = 0; i < 100000; i++) clock_gettime(CLOCK_MONOTONIC, &ts);
+    snprintf(line, sizeof line, "COST  clock_gettime(CLOCK_MONOTONIC): %.0f ns", per(t0, 100000));
+    say(line);
+    auto* p = static_cast<uint8_t*>(os::map_anon(nullptr, 16 * page, os::kRead | os::kWrite));
+    t0 = clk::now();
+    for (int i = 0; i < 10000; i++) os::protect(p, page, (i & 1) ? os::kRead | os::kWrite : os::kRead);
+    snprintf(line, sizeof line, "COST  protect, 1 page: %.0f ns", per(t0, 10000));
+    say(line);
+    t0 = clk::now();
+    for (int i = 0; i < 10000; i++) os::protect(p, 16 * page, (i & 1) ? os::kRead | os::kWrite : os::kRead);
+    snprintf(line, sizeof line, "COST  protect, 16 pages: %.0f ns", per(t0, 10000));
+    say(line);
+    os::protect(p, 16 * page, os::kRead | os::kWrite);
+    os::release(p, 16 * page);
+    std::shared_mutex m;
+    t0 = clk::now();
+    for (int i = 0; i < 1000000; i++) {
+        m.lock_shared();
+        m.unlock_shared();
+    }
+    snprintf(line, sizeof line, "COST  shared_mutex lock_shared + unlock_shared: %.0f ns", per(t0, 1000000));
+    say(line);
+    t0 = clk::now();
+    for (int i = 0; i < 1000000; i++) {
+        t_counter++;
+        asm volatile("" ::: "memory");
+    }
+    snprintf(line, sizeof line, "COST  thread_local increment: %.1f ns", per(t0, 1000000));
+    say(line);
+}
+
 static double ms_since(clk::time_point t) {
     return std::chrono::duration<double, std::milli>(clk::now() - t).count();
 }
@@ -199,6 +240,7 @@ int main() {
     check(seen_rax == 0x1234567890abcdefull && seen_xmm0 == 0x1234567890abcdefull && after == 0x55,
           "signal context: read rax and xmm0, write rax");
 
+    report_costs(page);
     say(failures ? "FAILED" : "all passed");
 #ifdef OH2_LOG_HOST
     // On the PS5 this is a title, which must not return from main (the

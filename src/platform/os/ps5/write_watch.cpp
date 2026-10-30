@@ -218,4 +218,8 @@ bool pages_readable(uint64_t start, uint64_t end) {
     return true;
 }
 
+// One page: the game's constant buffers are ~0x60 bytes, and an mprotect costs
+// ~28 us here (FINDINGS 7.13) against a few ns to compare them.
+size_t write_watch_compare_below() { return kPage; }
+
 }  // namespace fl::os

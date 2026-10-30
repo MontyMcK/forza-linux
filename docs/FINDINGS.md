@@ -352,3 +352,14 @@ Measured with our probe (`tools/ps5/probe/oh2probe.c`, raw log in `research/priv
 - Also fixed on the way: PS5 `write_watch_register` merged each new range with its neighbours and rebuilt the merged range (all pages written + one mprotect over all of it) under the exclusive lock; the game places thousands of 0x60-byte constant buffers side by side, so that grew with every placement. Ranges are no longer merged; only uncovered parts become new ranges.
 - **In game (Monty, 2026-10-31):** ~13 fps (130 frames per 10 s, all over 62 ms) = about half speed, since the game steps a fixed 1/29.97 s per frame. GPU idle ~70 ms per frame: CPU-bound. Per frame: ~4000 draws, 16k placement syncs (~15 ms), frame scans ~11 ms, uploads ~8 ms (re-arm ~4 ms), ~20k DXVK CS chunks.
 - **Linux baseline, same in-game scene (2026-10-31, 300 frames per 10 s):** 3964 draws, 20k CS chunks per frame (as on the PS5); placement syncs 0.6 ms/frame (4.7M syncs per 10 s, 183 ms), frame scans 0.8 ms, uploads 0.4 ms (re-arm 70 ms per 10 s). The PS5 backend was 14-25x slower per operation (not the CPU: the PS5 one is ~1.5-2x slower): it looked up the range map once per 16 KiB page (a hot dirty check of a 5 MB texture = 340 lookups, ~11 us per check). `each_page` now walks the ranges in order and `write_watch_written` stops at the first written page. Console os_test 23/23 with it.
+
+### 7.13 What things cost in a PS5 title (os_test COST lines, 2026-10-31)
+| | Linux (Monty's PC) | PS5 title |
+| --- | --- | --- |
+| `clock_gettime(CLOCK_MONOTONIC)` | 15 ns | **877 ns** |
+| `mprotect`, 1 or 16 pages | 0.33 / 0.14 us | **28.5 / 28.9 us** |
+| shared_mutex lock_shared + unlock | 8 ns | 32 ns |
+| thread_local increment (emutls on the PS5) | 0.6 ns | 0.3 ns |
+- Consequences: page-protection write tracking is ~90x dearer than on Linux (each re-arm and each write fault pays an mprotect), and every clock read ~60x. In game the PS5 ran ~16 fps after the each_page fix: hot dirty checks ~6.6 us, re-arms ~15.6 us, 82k uploads per 10 s averaging 330 bytes (constant buffers).
+- Fixes: `os::monotonic_ns()` (PS5: `sceKernelReadTsc` scaled by `sceKernelGetTscFrequency`, anchored to CLOCK_MONOTONIC) for QueryPerformanceCounter, GetTickCount, log timestamps and the frame stats; **compare mode**: placement buffers under `os::write_watch_compare_below()` (one page on the PS5, 0 = off on Linux; `FL_COMPARE_BELOW` overrides) aren't watched; each sync compares them with the copy last uploaded and uploads from that copy when they differ. Remapped memory is checked (`Resource::remapped`, set by the remap hook) before such a buffer is read again.
+- **Result in game (2026-10-31): 30 fps** (291 of 296 frames at 32 ms), 3609 draws per frame, GPU idle ~29 ms per frame; placement: 3.0M syncs per 10 s (746 ms comparing/scanning), 52.6k uploads (56 ms), re-arm 33 ms. Linux with FL_COMPARE_BELOW=16384 in game: 30 fps, no errors.

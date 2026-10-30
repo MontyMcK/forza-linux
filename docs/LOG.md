@@ -449,3 +449,9 @@ Where things stand (Monty asked for a handoff):
 - Linux baseline of the same scene shows the PS5 write-watch backend 14-25x slower per operation; fixed its per-page map lookups (each_page walks ranges, written() stops early), no more range merging, sequential fault runs. Console os_test 23/23.
 - Test switches added: `FL_XMA=silent` (silent XMA decoder on Linux), `FL_OPEN_FILE_BUDGET`, file-pool reopen stats under FL_LOG=fps.
 - **Next:** measure in game with the faster backend (Monty presses A); then the remaining per-frame costs (DXVK CS thread, the game's own threads on the slower CPU, re-arm mprotects); M2 card still unanswered.
+
+## 2026-10-31: Claude: full speed in game on the PS5
+
+- os_test now prints host COST lines; in a PS5 title mprotect is ~28.5 us and clock_gettime ~877 ns (FINDINGS 7.13). Added os::monotonic_ns (TSC on the PS5) and compare mode for small placement buffers. In game the PS5 went from ~13 fps to a steady 30 fps.
+- Linux check: os_test, gcn_layout_test, concrt_token_test pass, FL_EXIT_AFTER_FRAME=600 clean; in game with FL_COMPARE_BELOW=16384 for 5 min: 30 fps, no errors.
+- **Next:** Monty plays a while (crashes, missing graphics); the title-screen 3D background (still missing?); M2 card still unanswered; then the launcher (M3), audio (M6).

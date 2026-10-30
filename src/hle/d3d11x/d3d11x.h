@@ -119,6 +119,14 @@ struct Resource : DeviceChild {
     std::atomic<uint32_t> written_epoch{0};
     // Placement: the last re-arm failed, so writes aren't tracked. Never cold.
     std::atomic<bool> untracked{false};
+    // Placement buffers smaller than os::write_watch_compare_below(): not
+    // watched for writes; each sync compares them with their last upload.
+    bool compare = false;
+    std::mutex shadow_mutex;
+    std::vector<uint8_t> shadow;  // compare: what was last uploaded
+    // The game released or decommitted memory under this resource since its
+    // last sync (compare mode reads it at every sync, so it checks first).
+    std::atomic<bool> remapped{false};
     uint32_t tile_mode = 0;    // index into the GCN tile mode table (textures)
     uint32_t pitch = 0;        // in elements, 0 = default
     bool gpu_owned = false;    // render target / depth / UAV: the GPU writes it, never upload
