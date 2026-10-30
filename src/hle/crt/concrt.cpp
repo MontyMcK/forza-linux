@@ -206,7 +206,10 @@ WINAPI void* reg_delete(Registration* r, unsigned flags) {
     if (flags & 1) delete r;
     return r;
 }
-WINAPI void reg_destroy(Registration* r) { delete r; }
+WINAPI void reg_destroy(Registration* r) {
+    FL_LOG(concrt, "token registration %p destroyed (released from %p)", static_cast<void*>(r), __builtin_return_address(0));
+    delete r;
+}
 void* g_reg_vt[] = {(void*)&reg_delete, (void*)&reg_destroy};
 
 WINAPI void* token_delete(TokenState* t, unsigned flags) {
@@ -227,11 +230,14 @@ WINAPI TokenState* token_new() {
     return t;
 }
 
+// Like msvcr110 _Invoke (0x180001ccc): runs the callback unless a deregister
+// got there first, and always drops the list's reference.
 void reg_invoke(Registration* r) {
     int32_t expected = 0;
-    if (!r->state.compare_exchange_strong(expected, 1)) return;
-    r->proc(r->data);
-    r->state = 2;
+    if (r->state.compare_exchange_strong(expected, 1)) {
+        r->proc(r->data);
+        r->state = 2;
+    }
     refcount_release(r);  // the list's reference
 }
 
@@ -247,12 +253,15 @@ WINAPI void token_cancel(TokenState* t) {
     t->state = 2;
 }
 
-// _RegisterCallback(TaskProc, void* data, int initialRefs): initialRefs counts
-// the caller's reference (released by inlined code) plus the list's.
+// _RegisterCallback(TaskProc, void* data, int initialRefs): initialRefs are the
+// caller's (every call site passes 1 and releases it after _DeregisterCallback),
+// and the list holds one more (msvcr110 0x180001a34: lock add [reg+8], 1).
+// Counting the list's inside initialRefs freed the registration in deregister,
+// and the caller's own release then wrote into freed heap (2026-10-28 crash).
 WINAPI Registration* token_register(TokenState* t, TaskProc proc, void* data, int initial_refs) {
     auto* r = new Registration();
     r->vt = g_reg_vt;
-    r->refs = initial_refs;
+    r->refs = initial_refs + 1;
     r->token = t;
     r->state = 0;
     r->proc = proc;
@@ -265,6 +274,7 @@ WINAPI Registration* token_register(TokenState* t, TaskProc proc, void* data, in
             run_now = false;
         }
     }
+    FL_LOG(concrt, "_RegisterCallback(%d) -> %p from %p", initial_refs, static_cast<void*>(r), __builtin_return_address(0));
     if (run_now) reg_invoke(r);
     return r;
 }
@@ -281,11 +291,14 @@ WINAPI void token_deregister(TokenState* t, Registration* r) {
             }
     }
     if (removed) {
-        int32_t expected = 0;
-        if (r->state.compare_exchange_strong(expected, 2)) refcount_release(r);
+        r->state = 2;
+        refcount_release(r);  // the list's reference
         return;
     }
-    // Being invoked by a cancel on another thread: wait for it to finish.
+    // A cancel took the list: skip the callback if it has not started yet
+    // (reg_invoke still drops the list's reference), else wait for it.
+    int32_t expected = 0;
+    if (r->state.compare_exchange_strong(expected, 2)) return;
     while (r->state == 1) std::this_thread::yield();
 }
 
@@ -333,7 +346,7 @@ WINAPI AsyncCollection* acol_new(TokenState* token) {
         // STUB: the registration is never removed; tokens outliving their
         // collections would call back into freed memory. ppltasks passes _None().
         FL_STUB_ONCE("_AsyncTaskCollection with a real cancellation token");
-        token_register(token, &col_cancel_cb, &a->col, 1);
+        token_register(token, &col_cancel_cb, &a->col, 0);  // only the list holds it
     }
     return a;
 }

@@ -177,6 +177,21 @@ DeviceChild* wrapper_of(void* dxvk_obj) {
     return it == g_registry.end() ? nullptr : it->second;
 }
 
+DeviceChild* acquire_wrapper(void* dxvk_obj) {
+    if (!dxvk_obj) return nullptr;
+    std::lock_guard lock(g_reg_mutex);
+    auto it = g_registry.find(dxvk_obj);
+    if (it == g_registry.end()) return nullptr;
+    DeviceChild* w = it->second;
+    if (w->magic != DeviceChild::kMagic) return nullptr;
+    // Only while it is alive: a wrapper whose count reached 0 is being
+    // destroyed (its destructor waits for this lock to unregister).
+    ULONG r = w->refs.load();
+    while (r > 0 && !w->refs.compare_exchange_weak(r, r + 1)) {
+    }
+    return r > 0 ? w : nullptr;
+}
+
 DeviceChild* child_of(const void* game_iface) {
     if (!game_iface) return nullptr;
     auto* iface = static_cast<const Iface*>(game_iface);
