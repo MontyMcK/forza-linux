@@ -23,7 +23,7 @@ Run the runtime (`forza-linux`) and a native launcher as one homebrew title on M
 | Payloads | elfldr v0.27 on :9021, installed 2026-10-30 at Monty's request into `/data/pldmgr/payloads/elfldr/`, not autoloaded: Monty starts it after each jailbreak, and `send_payload.sh` starts it through pldmgr if it's down |
 | Logs | files on the console, pulled over FTP into `research/private/ps5-logs/` (no klog server) |
 | Title | **PPSA99642** (no GitHub code hits and unused by every reference project on 2026-10-30; taken: 99005, 99008, 99010, 99014, 99015, 99130, 99169-99171, 99300-99304, 99399, 99611, 99702, 99790, 99988-99999), folder `/data/homebrew/PPSA99642` (ShadowMount+ registers folder titles there) |
-| Dump | Monty's own dump, `Mount/` only (40 GB), copied on 2026-10-30 to his 500 GB USB stick "MONTYS 512" (exFAT, MBR: the PS5 can't see GPT drives) as `Anthem_1.0.0.64_x64__8wekyb3d8bbwe/Mount/`; Monty then copies it to the PS5's **internal storage** himself (suggested `/data/OpenHorizon2/…`, outside `/data/homebrew`, which ShadowMount+ scans). The launcher finds it wherever it ends up |
+| Dump | Monty's own dump, `Mount/` only (40 GB), copied on 2026-10-30 to Monty's 500 GB USB stick "MONTYS 512" (exFAT, MBR: the PS5 can't see GPT drives) as `Anthem_1.0.0.64_x64__8wekyb3d8bbwe/Mount/`; Monty then copies it to the PS5's **internal storage** (suggested `/data/OpenHorizon2/…`, outside `/data/homebrew`, which ShadowMount+ scans). The launcher finds it wherever it ends up |
 
 Scripts (`tools/ps5/`, settings in the gitignored `tools/ps5/ps5.env`; `ps5.env.example` is the template):
 

@@ -331,18 +331,18 @@ Next: check the cost of the full 4-sample resolve (FL_LOG=fps) and other users o
 
 - Monty asked for a PS5 port (runtime + native launcher as one homebrew title). Plan, checklist, pinned dependencies and verified-vs-trusted facts: docs/PS5_PORT.md. Work is on branch `ps5-test` in the worktree `~/Projects/open-horizon-2-ps5` (made from `main`; the main checkout's uncommitted WIC work on `test` was left alone). `build-dxvk`/`build-ffmpeg-xma` there are symlinks to the main checkout's builds (excluded in .git/info/exclude).
 - Setup: `tools/ps5/` scripts + gitignored `tools/ps5/ps5.env` (console IP, ftpsrv :2121, pldmgr :8084). elfldr v0.27 installed into pldmgr at Monty's request (not autoloaded; send_payload.sh starts it). FTP round trip checked. Title ID PPSA99642. Logs: files pulled over FTP into research/private/ps5-logs/.
-- Monty's dump: Mount/ copied to his 500 GB USB stick (exFAT, MBR) for him to plug into the PS5; the stick writes at ~6 MB/s.
+- Monty's dump: Mount/ copied to Monty's 500 GB USB stick (exFAT, MBR) to go into the PS5; the stick writes at ~6 MB/s.
 - Rule 0: `tools/check_no_game_data.sh --package DIR` (tested: blocks a dump file by name+size and a renamed one by bytes); ps5ftp.py refuses game data and writes outside the title folder.
 - Probe (tools/ps5/probe/oh2probe.c) as a payload: 24 pass, 2 fail. Results in FINDINGS §7: exec via sceKernelMprotect, GS base via sysarch, umtx, 16 KiB pages, reservations at 0x140000000 and 0x1000000000, mcontext at +64 and FXSAVE at +320, SIGSEGV write faults at ~41 us. Fails: MAP_FIXED|MAP_EXCL overwrites (as reported), 1 GiB direct memory refused in a payload (no budget). The console reports firmware 13.590.001 (Monty: 13.20).
 - Linux check: gcn_layout_test and dxvk_smoke pass, FL_EXIT_AFTER_FRAME=300 exits cleanly.
 
 - Step 4 started: src/platform/os/ (README status table, FL_OS backend selection in CMake), futex and file existence moved, tests/os_test.cpp passes; Linux check passes.
 
-Next: Step 4's memory area (reserve/commit/protect/exec/page size: src/hle/kernelx/memory.cpp, src/loader/pe_image.cpp, the d3d11x gpumem/placement mappings) behind src/platform/os/memory.h, then the rest of the Step 4 list. In parallel, Step 3b (the probe as a title; needs Step 5's packaging) settles direct memory and whether a title can read /mnt/usbN. The USB copy of Monty's dump was still running at the end of this entry: verify every file's size against game_data/ before telling him to unplug it.
+Next: Step 4's memory area (reserve/commit/protect/exec/page size: src/hle/kernelx/memory.cpp, src/loader/pe_image.cpp, the d3d11x gpumem/placement mappings) behind src/platform/os/memory.h, then the rest of the Step 4 list. In parallel, Step 3b (the probe as a title; needs Step 5's packaging) settles direct memory and whether a title can read /mnt/usbN. The USB copy of Monty's dump was still running at the end of this entry: verify every file's size against game_data/ before telling Monty to unplug it.
 
 ## 2026-10-30 (late evening): Claude: GPL-3.0-or-later licence; dump goes to internal storage
 
 - Monty: "give the project a GPL-3 licence". LICENSE (the GNU GPL v3 text, md5 1ebbd3e3...0464, as shipped by the PS5 SDK and PS5_Vulkan), README "License" section (or-later notice, third-party licences, game not covered), PLAN decision, CLAUDE.md Rule 1 note (copy only GPL-3-compatible code). Committed on ps5-test only: main still has no LICENSE until Monty says to add it there (the PS5 brief says never touch main).
-- Monty will copy the dump from the USB stick to the PS5's internal storage himself, and starts elfldr after each jailbreak. ps5.env and PS5_PORT.md updated; the dump path on the console is still to be confirmed with him.
+- Monty will copy the dump from the USB stick to the PS5's internal storage, and starts elfldr after each jailbreak. ps5.env and PS5_PORT.md updated; the dump path on the console is still to be confirmed with Monty.
 
 Next: unchanged (Step 4 memory area; Step 3b title probe).
