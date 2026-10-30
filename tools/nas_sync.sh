@@ -26,7 +26,8 @@ if [[ -z ${OH2_NAS_DIR:-} ]] && ! mountpoint -q "$HOME/NetworkStorage"; then
 fi
 mkdir -p "$main/research/private"
 exec 9> "$main/research/private/.nas-sync.lock"
-flock -n 9 || { echo "nas_sync: another sync is running"; exit 0; }
+# A push during a sync waits for it, so the NAS always ends with the latest push.
+flock -w 7200 9 || { echo "nas_sync: another sync held the lock for 2 hours: skipped"; exit 0; }
 
 mkdir -p "$nas/repo" "$nas/research-private" "$nas/agent-notes" "$nas/config"
 copy() { rsync -rt --no-perms --no-owner --no-group --modify-window=2 "$@"; }
