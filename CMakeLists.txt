@@ -92,6 +92,11 @@ add_executable(concrt_token_test tests/concrt_token_test.cpp src/hle/crt/concrt.
 target_include_directories(concrt_token_test PRIVATE src)
 target_link_libraries(concrt_token_test PRIVATE pthread)
 
+add_executable(wic_png_test tests/wic_png_test.cpp src/hle/wic/wic.cpp src/hle/winrt/object.cpp src/hle/registry.cpp
+               src/common/log.cpp src/common/png.cpp src/common/wstr.cpp)
+target_include_directories(wic_png_test PRIVATE src)
+target_link_libraries(wic_png_test PRIVATE pthread PkgConfig::ZLIB)
+
 # Dev tool (reads game files): untile a .swatchbin mip to PNG.
 add_executable(swatch_view tools/swatch_view.cpp src/hle/xg/gcn.cpp src/common/log.cpp src/common/png.cpp src/common/workers.cpp)
 target_include_directories(swatch_view PRIVATE src)
