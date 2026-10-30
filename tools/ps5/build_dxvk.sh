@@ -19,11 +19,13 @@ install="$ps5_root/build-ps5/dxvk/install"
 shopt -s nullglob
 patches=("$ps5_root"/tools/ps5/dxvk-patches/*.patch)
 shopt -u nullglob
-stamp=$( (cat "${patches[@]}" /dev/null) | sha256sum | cut -c1-16)
+overlay="$ps5_root/tools/ps5/dxvk-ps5"  # new files (the PS5 WSI)
+stamp=$( (cat "${patches[@]}" /dev/null; find "$overlay" -type f -print0 | sort -z | xargs -0 cat) | sha256sum | cut -c1-16)
 if [[ ! -f $src/.oh2-ps5-stamp || $(<"$src/.oh2-ps5-stamp") != "$stamp" ]]; then
   rm -rf "$src" "$build"
   mkdir -p "$src"
   rsync -a --exclude .git "$upstream/" "$src/"
+  rsync -a "$overlay/" "$src/"
   for p in "${patches[@]}"; do
     [[ -f $p ]] || continue
     patch -d "$src" -p1 --forward --silent < "$p"
@@ -49,16 +51,38 @@ endian = 'little'
 
 [built-in options]
 default_library = 'static'
-cpp_args = ['-march=znver2', '-DDXVK_PS5=1']
-c_args = ['-march=znver2', '-DDXVK_PS5=1']
+cpp_args = ['-march=znver2', '-DDXVK_PS5=1', '-include', '$src/include/oh2_ps5_compat.h']
+c_args = ['-march=znver2', '-DDXVK_PS5=1', '-Dstatic_assert=_Static_assert', '-include', '$src/include/oh2_ps5_compat.h']
 
 [properties]
 needs_exe_wrapper = true
 INI
 if [[ ! -f $build/build.ninja ]]; then
   meson setup "$build" "$src" --cross-file "$cross" --buildtype=release --prefix="$install" \
-    -Dnative_sdl3=disabled -Dnative_sdl2=disabled -Dnative_glfw=disabled \
+    -Dnative_ps5=enabled -Dnative_sdl3=disabled -Dnative_sdl2=disabled -Dnative_glfw=disabled \
     -Denable_d3d8=false -Denable_d3d9=false -Denable_d3d10=false
 fi
-ninja -C "$build" install
-echo "PS5 DXVK installed to $install"
+# DXVK's own shared d3d11/dxgi links fail here on purpose: RADV
+# (vk_icdGetInstanceProcAddr) and the platform's open_memstream only come at
+# the title link. Their objects become static archives instead.
+ninja -C "$build" -k 0 > "$ps5_root/build-ps5/dxvk-build.log" 2>&1 || true
+if grep -q 'error:' "$ps5_root/build-ps5/dxvk-build.log" && grep 'error:' "$ps5_root/build-ps5/dxvk-build.log" | grep -qv 'ld.lld\|linker command failed'; then
+  grep 'error:' "$ps5_root/build-ps5/dxvk-build.log" | head -20 >&2
+  echo "PS5 DXVK: compile errors (build-ps5/dxvk-build.log)" >&2
+  exit 1
+fi
+rm -rf "$install" && mkdir -p "$install/lib"
+sdkbin="$sdk/bin"
+for t in d3d11 dxgi; do
+  objs=("$build"/src/$t/libdxvk_$t.so.*.p/*.o)
+  [[ -e ${objs[0]} ]] || { echo "PS5 DXVK: no $t objects" >&2; exit 1; }
+  "$sdkbin/prospero-ar" rcs "$install/lib/libdxvk_$t.a" "${objs[@]}"
+done
+for a in src/dxvk/libdxvk.a src/spirv/libspirv.a src/util/libutil.a src/vulkan/libvkcommon.a src/wsi/libwsi.a \
+         subprojects/dxbc-spirv/libdxbc_spv.a subprojects/libdisplay-info/libdisplay-info.a; do
+  # Meson's archives are thin (they point at the objects): make real ones.
+  objs=("$build/$a.p"/*.o)
+  [[ -e ${objs[0]} ]] || { echo "PS5 DXVK: $a has no objects" >&2; exit 1; }
+  "$sdkbin/prospero-ar" rcs "$install/lib/$(basename "$a")" "${objs[@]}"
+done
+echo "PS5 DXVK static libraries in $install/lib"

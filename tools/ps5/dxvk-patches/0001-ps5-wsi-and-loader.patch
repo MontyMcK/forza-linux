@@ -1,0 +1,85 @@
+diff -ruN a/meson.build b/meson.build
+--- a/meson.build	2026-10-30 23:11:54.479627879 +1300
++++ b/meson.build	2026-10-30 23:11:54.496711077 +1300
+@@ -161,7 +161,10 @@
+   if lib_glfw.found()
+     compiler_args += ['-DDXVK_WSI_GLFW']
+   endif
+-  if (not lib_sdl3.found() and not lib_sdl2.found() and not lib_glfw.found())
++  if get_option('native_ps5').enabled()
++    compiler_args += ['-DDXVK_WSI_PS5']
++  endif
++  if (not lib_sdl3.found() and not lib_sdl2.found() and not lib_glfw.found() and not get_option('native_ps5').enabled())
+     error('SDL3, SDL2, or GLFW are required to build dxvk-native')
+   endif
+   
+diff -ruN a/meson_options.txt b/meson_options.txt
+--- a/meson_options.txt	2026-10-30 23:11:54.477228712 +1300
++++ b/meson_options.txt	2026-10-30 23:11:54.496682857 +1300
+@@ -6,4 +6,5 @@
+ option('build_id',     type : 'boolean', value : false)
+ option('native_glfw',  type : 'feature', value : 'auto', description: 'Enable GLFW WSI for DXVK Native')
+ option('native_sdl2',  type : 'feature', value : 'auto', description: 'Enable SDL2 WSI for DXVK Native')
++option('native_ps5',  type : 'feature', value : 'disabled', description: 'PS5 WSI (VK_KHR_display) for DXVK Native, Open Horizon 2')
+ option('native_sdl3',  type : 'feature', value : 'auto', description: 'Enable SDL3 WSI for DXVK Native')
+diff -ruN a/src/vulkan/vulkan_loader.cpp b/src/vulkan/vulkan_loader.cpp
+--- a/src/vulkan/vulkan_loader.cpp	2026-10-30 23:11:54.489511438 +1300
++++ b/src/vulkan/vulkan_loader.cpp	2026-10-30 23:11:54.496771026 +1300
+@@ -9,7 +9,19 @@
+ 
+ namespace dxvk::vk {
+ 
++#ifdef DXVK_PS5
++}  // namespace dxvk::vk
++// The PS5 title links PS5_Vulkan's RADV statically (no dlopen in a title):
++// its loader-facing entry point stands in for libvulkan's.
++extern "C" PFN_vkVoidFunction vk_icdGetInstanceProcAddr(VkInstance instance, const char* pName);
++namespace dxvk::vk {
++#endif
++
+   static std::pair<HMODULE, PFN_vkGetInstanceProcAddr> loadVulkanLibrary() {
++#ifdef DXVK_PS5
++    Logger::info("Vulkan: RADV linked into the title (vk_icdGetInstanceProcAddr)");
++    return std::make_pair(HMODULE(nullptr), &vk_icdGetInstanceProcAddr);
++#endif
+     static const std::array<const char*, 2> dllNames = {{
+ #ifdef _WIN32
+       "winevulkan.dll",
+diff -ruN a/src/wsi/meson.build b/src/wsi/meson.build
+--- a/src/wsi/meson.build	2026-10-30 23:11:54.482072234 +1300
++++ b/src/wsi/meson.build	2026-10-30 23:11:54.496727826 +1300
+@@ -4,6 +4,7 @@
+   'win32/wsi_monitor_win32.cpp',
+   'win32/wsi_platform_win32.cpp',
+   'win32/wsi_window_win32.cpp',
++  'ps5/wsi_platform_ps5.cpp',
+   'sdl3/wsi_monitor_sdl3.cpp',
+   'sdl3/wsi_platform_sdl3.cpp',
+   'sdl3/wsi_window_sdl3.cpp',
+diff -ruN a/src/wsi/wsi_platform.cpp b/src/wsi/wsi_platform.cpp
+--- a/src/wsi/wsi_platform.cpp	2026-10-30 23:11:54.484526109 +1300
++++ b/src/wsi/wsi_platform.cpp	2026-10-30 23:11:54.496742136 +1300
+@@ -12,6 +12,9 @@
+ #if defined(DXVK_WSI_WIN32)
+     &Win32WSI,
+ #endif
++#if defined(DXVK_WSI_PS5)
++    &Ps5WSI,
++#endif
+ #if defined(DXVK_WSI_SDL3)
+     &Sdl3WSI,
+ #endif
+diff -ruN a/src/wsi/wsi_platform.h b/src/wsi/wsi_platform.h
+--- a/src/wsi/wsi_platform.h	2026-10-30 23:11:54.486933265 +1300
++++ b/src/wsi/wsi_platform.h	2026-10-30 23:11:54.496758706 +1300
+@@ -114,6 +114,10 @@
+ #if defined(DXVK_WSI_WIN32)
+   extern WsiBootstrap Win32WSI;
+ #endif
++#if defined(DXVK_WSI_PS5)
++  extern WsiBootstrap Ps5WSI;
++#endif
++
+ #if defined(DXVK_WSI_SDL3)
+   extern WsiBootstrap Sdl3WSI;
+ #endif
