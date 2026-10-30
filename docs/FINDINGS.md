@@ -16,7 +16,7 @@ Each entry should say **how it was verified**. Mark guesses with **(unverified)*
 
 ## 2. The executable: `Mount/forza_durango_release_final.exe`
 
-- PE32+, AMD64, GUI subsystem, 58,204,160 bytes on disk.
+- PE32+, AMD64, GUI subsystem.
 - ImageBase `0x140000000`, SizeOfImage `0x3A18000` (~58 MB), entry point RVA `0xF18058`.
 - Has a `.reloc` section, so it can be relocated, but we should still try to map it at the preferred base.
 - Sections: `.text` (0x1DB300F), `BINK`, `RADCODE`, `.rdata`, `.data` (0xAF2568), `.pdata` (0x1F2E28 → full x64 unwind info), `minATL`, `.tls`, `_RDATA`, `BINKDATA`, `BINKCONS`, `RADDATA`, `.rsrc`, `.reloc`.
@@ -277,7 +277,7 @@ Measured with our probe (`tools/ps5/probe/oh2probe.c`, raw log in `research/priv
 - **Title registration:** ShadowMount+ registers `/data/homebrew/PPSA99642` (nullfs onto `/system_ex/app/PPSA99642`, `mount.lnk` in `/user/app/PPSA99642`), but on 2026-10-30 19:36 it failed with "[SHELLCORE] AppInstallAll hook is no longer installed / [REG] internal AppInstallTitleDir bridge unavailable" and stopped after 2 retries, the same failure as on 2026-10-04 (fixed then by a reboot + re-jailbreak). It shows in `/data/shadowmount/debug.log`. Our title folder itself was fine (SM+ read its name "Open Horizon 2" from param.json).
 - After a full restart (20:46) SM+ registered PPSA99642 ("AppInstallAll bridge consumed ... result=0", "installed game PPSA99642"). `oh2launch` (sceLncUtilLaunchApp, foreground user) started it: return 0x18 = its app id; OnionHEN logged "[lifecycle] Big App started pid=97 appid=24 tid=PPSA99642" and a second start 7 s later (appid 8216, cause unknown). The title's log never reached `/data/homebrew/PPSA99642/logs`: the title probably can't see `/data` (to confirm). A title's `/download0` is the image file `/user/download/<TITLE_ID>/download0.dat` (1.2 GB for downloadDataSize 1024), so FTP can't read files written there; the title probe now also uploads its log to ftpsrv over the loopback.
 - **Redeploying a registered title:** never delete `eboot.bin` before replacing it. Our first redeploy did (delete, then rename): SM+ scanned in the gap ("source eboot.bin missing", "nullfs mount failed"), hit its 2-retry limit and skips the title until SM+ restarts (a console restart). Launches meanwhile fail with 0x80940033 (SM+ log: "launch mount unavailable ... status=5"). ftpsrv's RNFR/RNTO replaces an existing file atomically ("226 Path renamed"), which ps5ftp.py now relies on, uploading eboot.bin and param.json last.
-- **Dump on internal storage:** copied on the console by `oh2copydump` from the USB stick in 1474 s (27 MiB/s, payload context: USB read + /data write), 2323 files / 39,985 MiB, every size checked on the console and again over FTP against the PC copy.
+- **Dump on internal storage:** copied on the console by `oh2copydump` from the USB stick in 1474 s (27 MiB/s, payload context: USB read + /data write), every file's size checked on the console and again over FTP against the PC copy.
 - TSC 1,596,300,199 Hz. `sysconf(_SC_NPROCESSORS_ONLN)` = 16 (other projects report titles run on 13 CPUs, affinity 0x1fff; unverified here).
 
 ### 7.2 Memory (payload context, 2026-10-30)
@@ -308,3 +308,4 @@ Measured with our probe (`tools/ps5/probe/oh2probe.c`, raw log in `research/priv
 - **250** files open by path before EMFILE.
 - MXCSR at `main` is 0x1f80 (PS5_Vulkan's app CRT sets the IEEE state); default thread stack 64 KiB; 16 CPUs reported.
 - Signals, GS base, umtx, exec via sceKernelMprotect, 16 KiB pages: as in the payload (7.2, 7.3); write fault + mprotect ~35 us.
+- **With ShadowMount+ 1.7beta11 (2026-10-30 21:22, same probe title):** the sandbox shows `/data` (opendir ok), `/data/homebrew`, `/data/OpenHorizon2` and the mounted USB stick `/mnt/usb0`; the game's exe opens and reads from both `/data/OpenHorizon2/<folder>/Mount/` and `/mnt/usb0/<folder>/Mount/`. `stat` and now `access` work; `lstat` is still EPERM everywhere; `/mnt/usb1` (nothing plugged in), `/user`, `/system` stay ENOENT; `opendir` of `/app0` and `/download0` works too. 29 pass, 1 fail (MAP_EXCL). **The storage blocker is gone with SM+ >= 1.7beta4.** A probe run looks like "opened and closed" on screen: it has no UI and returns from main after ~10 s.
