@@ -326,3 +326,14 @@ Next: check the cost of the full 4-sample resolve (FL_LOG=fps) and other users o
 - New tools: FL_GPU_PROFILE(_AT_TIME) (src/hle/d3d11x/gpu_profile.cpp), FL_CPU_PROFILE (src/loader/cpu_profile.cpp), DXVK counters in FL_LOG=fps (patch 0006).
 - Results: 5 min soak, dynamic (refresh cap 260 Hz): 153-193 fps average, 1% low ~80-90 fps, no crash; screenshots correct. Its one 85-117 ms frame every 30 s was the soak's own FL_SCREENSHOT_AT_TIME capture (read-back + PNG on the render thread): a 3 min run without screenshots had no frame over 20 ms (FL_LOG=fps now logs every frame over 40 ms as "hitch"; FL_LOG=file times FlushFileBuffers). Autosaves (every 60 s) cause no hitch.
 - Next: the render thread is still the limit (~5 ms/frame): ~10k CS chunks per frame from bundle remaps (AllocCsChunk, CS thread at ~50%), the page-tracking ioctls (~17% of the render thread: per-bind scans of hot resources and the per-frame scan); frame times are bimodal (p10 3.8 ms / p90 ~9 ms), probably the 4-frame static-cascade cycle.
+
+## 2026-10-30 (evening): Claude: PS5 port, Steps 1-3 (setup, research, payload probe)
+
+- Monty asked for a PS5 port (runtime + native launcher as one homebrew title). Plan, checklist, pinned dependencies and verified-vs-trusted facts: docs/PS5_PORT.md. Work is on branch `ps5-test` in the worktree `~/Projects/open-horizon-2-ps5` (made from `main`; the main checkout's uncommitted WIC work on `test` was left alone). `build-dxvk`/`build-ffmpeg-xma` there are symlinks to the main checkout's builds (excluded in .git/info/exclude).
+- Setup: `tools/ps5/` scripts + gitignored `tools/ps5/ps5.env` (console IP, ftpsrv :2121, pldmgr :8084). elfldr v0.27 installed into pldmgr at Monty's request (not autoloaded; send_payload.sh starts it). FTP round trip checked. Title ID PPSA99642. Logs: files pulled over FTP into research/private/ps5-logs/.
+- Monty's dump: Mount/ copied to his 500 GB USB stick (exFAT, MBR) for him to plug into the PS5; the stick writes at ~6 MB/s.
+- Rule 0: `tools/check_no_game_data.sh --package DIR` (tested: blocks a dump file by name+size and a renamed one by bytes); ps5ftp.py refuses game data and writes outside the title folder.
+- Probe (tools/ps5/probe/oh2probe.c) as a payload: 24 pass, 2 fail. Results in FINDINGS §7: exec via sceKernelMprotect, GS base via sysarch, umtx, 16 KiB pages, reservations at 0x140000000 and 0x1000000000, mcontext at +64 and FXSAVE at +320, SIGSEGV write faults at ~41 us. Fails: MAP_FIXED|MAP_EXCL overwrites (as reported), 1 GiB direct memory refused in a payload (no budget). The console reports firmware 13.590.001 (Monty: 13.20).
+- Linux check: gcn_layout_test and dxvk_smoke pass, FL_EXIT_AFTER_FRAME=300 exits cleanly.
+
+Next: PS5_PORT.md Step 4 (src/platform/os/ with a Linux backend, behaviour unchanged), and Step 3b (the probe as a title, which needs Step 5's packaging) to settle direct memory and whether a title can read /mnt/usbN.

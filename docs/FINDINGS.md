@@ -257,3 +257,33 @@ Linux equivalents of the two big missing pieces: **VK_EXT_external_memory_host**
 - `.zip` (584): ordinary zip archives. `.minizip` (24): magic `PGZP` (Forza container). `.bank`: FMOD. Also `.nt`, `.owt`, `.tz`, `.avpins`, `.lightdb`, `.pvs`… We don't need to understand these, because the game parses them itself.
 - The game opens assets as **`g:\media\...`**, falling back to `.\media\...` (verified via the file log). `G:` is the package root, `src/hle/kernelx/vfs.cpp` maps it to `--game-dir`, and lookups are case-insensitive (e.g. `audioglobals.xml` resolves to `AudioGlobals.xml`).
 - The game checks `CRITICAL_SECTION.DebugInfo != 0` as an "initialized" flag (spin loop at rva 0x13d0822), so InitializeCriticalSection must set DebugInfo to non-zero (we use -1, as Windows does without debug info).
+
+## 7. PS5 platform (the PS5 port, docs/PS5_PORT.md)
+
+Measured with our probe (`tools/ps5/probe/oh2probe.c`, raw log in `research/private/ps5-logs/`) unless marked otherwise.
+**Payload context** = an ELF sent to elfldr (its own process, not a title). Facts that depend on being a title (memory budgets, sandbox, `access()`) still need the title-context run (PS5_PORT.md Step 3b).
+
+### 7.1 Monty's console (2026-10-30)
+- `sceKernelGetSystemSwVersion` reports **13.590.001** (0x13590001); Monty says the firmware is 13.20. Possibly the HEN spoofs the version (unverified). Record both when comparing with other projects' facts.
+- Jailbreak stack: pldmgr v0.5.2 (web API :8084) autoloads kstuff, ShadowMount+, OnionHEN; ftpsrv v0.21.1 on :2121. elfldr v0.27 (ps5-payload-dev, sha256 82f62276...407d) was installed on 2026-10-30 as a pldmgr payload (`/data/pldmgr/payloads/elfldr/`) and is **not autoloaded**: `tools/ps5/send_payload.sh` starts it through pldmgr when :9021 is closed. pldmgr only loads payloads listed in its own `/data/pldmgr/payloads/<name>/` folders ("Invalid payload name" otherwise).
+- TSC 1,596,300,199 Hz. `sysconf(_SC_NPROCESSORS_ONLN)` = 16 (other projects report titles run on 13 CPUs, affinity 0x1fff; unverified here).
+
+### 7.2 Memory (payload context, 2026-10-30)
+- **Page size 16 KiB** (`sysconf`, `getpagesize`). `sceKernelMprotect(base+4K, 4K, R)` returns 0 and protects the **whole 16 KiB page** (a write to base+0 faults). So PE sections sharing a 16 KiB page need the union of their protections.
+- **Executable memory:** `mmap(RWX)` of anonymous memory is *granted but silently without execute* (`sceKernelQueryMemoryProtection` reports 0x3). Map RW, then `sceKernelMprotect` to RX or RWX: code runs (flexible and direct memory). RWX lets code be rewritten without another protection change. libc `mprotect(RX)` also returned 0. `sceKernelMapDirectMemory` with RWX is refused (0x80020016).
+- **Reservations:** `sceKernelReserveVirtualRange(&a, len, 0x10 /*fixed*/, 64K)` gave 512 MiB exactly at **0x140000000** (the game's image base) and 16 GiB exactly at 0x1000000000. Anonymous `mmap(MAP_FIXED)` inside a reservation works; a fixed *file* mapping inside a reservation read the file correctly here (prospero-win reports it breaking in a title: recheck there). A reservation with no address landed at 0x200020000.
+- **`MAP_FIXED|MAP_EXCL` replaces an existing mapping** (the old page read 0 afterwards). There is no Linux `MAP_FIXED_NOREPLACE` equivalent: the loader must keep its own bookkeeping of what it mapped.
+- Direct memory: `sceKernelGetDirectMemorySize()` = 0 and `AvailableDirectMemorySize` = 0x8002000c in a payload, yet `sceKernelAllocateDirectMemory(64 KiB, type 12)` succeeded (phys 0x2000430000) and mapped RW at a fixed address inside a reservation; 1 GiB was refused (0x80020023). A payload has no direct budget of its own (PS5_PayloadSDK fork notes the same); the title run decides this.
+- Flexible memory in a payload: configured 8192 MiB, available 8158 MiB; `mmap(NULL, 4 GiB, PROT_NONE)` and `mmap(NULL, 512 MiB, RW)` were both granted. Titles are reported to get ~448 MiB flexible (unverified here).
+
+### 7.3 Threads, sync, signals (payload context, 2026-10-30)
+- **GS base:** `sysarch(AMD64_SET_GSBASE=131)` sets it, `AMD64_GET_GSBASE=130` and `mov %gs:0` read it back; it is per thread and survives sleeps, yields and syscalls. Initial value 0. A signal handler runs with the interrupted thread's GS base (read with sysarch inside the handler). Whether the ucontext holds it is unverified: the value was not at FreeBSD's `mc_gsbase` slot (+808); the copy found at +1160 is probably the test's own local variable above the signal frame.
+- **umtx** replaces futex: `_umtx_op(addr, UMTX_OP_WAIT_UINT_PRIVATE=15, expected, NULL, &relative_timespec)` / `UMTX_OP_WAKE_PRIVATE=16` (and the shared 11/3) wake in 50.1 ms as scheduled; a changed value returns at once; a 30 ms timeout returns -1/ETIMEDOUT(60) after 30.1 ms.
+- **Signal context (FreeBSD layout, offset by 48 bytes):** `uc_mcontext` at **ucontext+64**; inside it the FreeBSD amd64 order: rdi +8, rsi +16, rdx +24, rcx +32, r8 +40, r9 +48, rax +56, rbx +64, rbp +72, r10..r15 +80..+120, **rip +160** (ucontext+224). The **FXSAVE image is at ucontext+320** (xmm0 at +480, MXCSR at +344). Measured with markers in every GPR and xmm0-15.
+- Faults: a read of a PROT_NONE page gives SIGSEGV with the right `si_addr`; returning after moving rip resumes. A write to a read-only page gives **SIGSEGV** (not SIGBUS); a handler that `sceKernelMprotect`s the page RW and returns lets the write land: 640/640, **~41 us per fault + mprotect** (GPU write tracking cost). int3 gives SIGTRAP with rip after it; ud2 gives SIGILL with rip on it. `sigaltstack` + `SA_ONSTACK` delivers on the alternate stack.
+- **MXCSR at process start is 0x9fc0** (flush-to-zero and denormals-are-zero on). Windows and Linux start at 0x1f80: game threads must be given 0x1f80 explicitly.
+- Default pthread stack **64 KiB**: every thread we create needs an explicit stack size.
+
+### 7.4 Files (payload context)
+- `access()` works in a payload (returned 0); other projects report EPERM for every path inside a title, so the platform layer uses `stat()` (recheck in the title run).
+- With no USB stick inserted, `/mnt/usb0..7` exist and are empty.
