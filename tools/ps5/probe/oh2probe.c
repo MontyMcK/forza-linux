@@ -968,6 +968,12 @@ int main(void) {
 #endif
   say("DONE %d pass, %d fail", n_pass, n_fail);
   CHECKPOINT();
+#ifdef OH2_PROBE_TITLE
+  /* A title must not return from main: the console treats that as a failure.
+   * Stay open (idle) until closed from the home screen or by oh2launch. */
+  if (net_fd >= 0) close(net_fd);
+  for (;;) sleep(3600);
+#endif
   close(log_fd);
   return 0;
 }

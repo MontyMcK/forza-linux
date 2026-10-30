@@ -187,5 +187,11 @@ int main() {
           "signal context: read rax and xmm0, write rax");
 
     say(failures ? "FAILED" : "all passed");
+#ifdef OH2_LOG_HOST
+    // On the PS5 this is a title, which must not return from main (the
+    // console treats that as a failure): stay open until closed.
+    if (out_fd >= 0) close(out_fd);
+    for (;;) sleep(3600);
+#endif
     return failures ? 1 : 0;
 }
