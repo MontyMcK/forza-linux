@@ -73,7 +73,7 @@ Add a line whenever a decision is made: `- YYYY-MM-DD: decision, reason`.
 - 2026-10-30: PS5 port (docs/PS5_PORT.md, branches ps5-test/ps5): one homebrew title PPSA99642 holding launcher + runtime, rendering through PS5_Vulkan's RADV (statically linked) with DXVK. Reason: Monty asked; PS5_Vulkan is the only Vulkan driver for titles and proven with real apps.
 - 2026-10-30: PS5 payloads go through elfldr v0.27 (installed into pldmgr at Monty's request, started on demand by tools/ps5/send_payload.sh). Reason: pldmgr only loads payloads from its own folders.
 - 2026-10-30: `tools/check_no_game_data.sh --package DIR` audits every PS5 package and upload against a live listing of game_data/ (name+size, byte compare on size matches). Reason: Rule 0 covers builds and downloads, not just git.
-- (open) Project license. LGPL-2.1+ makes it easy to borrow Wine code (unwinder, CRT bits). The repo has been public (github.com/MontyMcK/open-horizon-2, named forza-linux until 2026-10-27) since 2026-10-25 with no LICENSE file, i.e. all rights reserved by default: ask the user which one they want.
+- 2026-10-30: Project license: **GPL-3.0-or-later** (LICENSE, README). Monty chose GPL-3 so PS5 builds, which link GPL-3.0-or-later PS5_Vulkan and the payload SDK, can be shared. Code we take in must be GPL-3-compatible (MIT, zlib, BSD, LGPL-2.1+, GPL-3.0+; not GPL-2.0-only). Before this the repo (public since 2026-10-25) had no license.
 
 ---
 

@@ -29,3 +29,11 @@ python3 launcher/forza_launcher.py --print-command     # show what Play would ru
 - **Logs**: live output with filters. Every session's full output is kept in `~/.cache/forza-linux/logs/`.
 
 Settings live in `~/.config/forza-linux/launcher.json`. The launcher shows art from your own game folder. The desktop icon is made from your game's logo and is written only to `~/.local/share/icons`. Neither is part of this repository.
+
+## License
+
+Open Horizon 2 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See [LICENSE](LICENSE) for the full text.
+
+Third-party code keeps its own license: AMD addrlib in `third_party/addrlib` (MIT), DXVK in `third_party/dxvk` (zlib), and FFmpeg, which `tools/build_ffmpeg_xma.sh` downloads and builds (LGPL-2.1-or-later). PS5 builds also link PS5_Vulkan and the PS5 payload SDK (both GPL-3.0-or-later); see [docs/PS5_PORT.md](docs/PS5_PORT.md).
+
+The game itself is not part of this project and is not covered by this license. No game files are included.

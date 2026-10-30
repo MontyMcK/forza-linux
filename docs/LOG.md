@@ -339,3 +339,10 @@ Next: check the cost of the full 4-sample resolve (FL_LOG=fps) and other users o
 - Step 4 started: src/platform/os/ (README status table, FL_OS backend selection in CMake), futex and file existence moved, tests/os_test.cpp passes; Linux check passes.
 
 Next: Step 4's memory area (reserve/commit/protect/exec/page size: src/hle/kernelx/memory.cpp, src/loader/pe_image.cpp, the d3d11x gpumem/placement mappings) behind src/platform/os/memory.h, then the rest of the Step 4 list. In parallel, Step 3b (the probe as a title; needs Step 5's packaging) settles direct memory and whether a title can read /mnt/usbN. The USB copy of Monty's dump was still running at the end of this entry: verify every file's size against game_data/ before telling him to unplug it.
+
+## 2026-10-30 (late evening): Claude: GPL-3.0-or-later licence; dump goes to internal storage
+
+- Monty: "give the project a GPL-3 licence". LICENSE (the GNU GPL v3 text, md5 1ebbd3e3...0464, as shipped by the PS5 SDK and PS5_Vulkan), README "License" section (or-later notice, third-party licences, game not covered), PLAN decision, CLAUDE.md Rule 1 note (copy only GPL-3-compatible code). Committed on ps5-test only: main still has no LICENSE until Monty says to add it there (the PS5 brief says never touch main).
+- Monty will copy the dump from the USB stick to the PS5's internal storage himself, and starts elfldr after each jailbreak. ps5.env and PS5_PORT.md updated; the dump path on the console is still to be confirmed with him.
+
+Next: unchanged (Step 4 memory area; Step 3b title probe).
