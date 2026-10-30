@@ -37,6 +37,7 @@ Scripts (`tools/ps5/`, settings in the gitignored `tools/ps5/ps5.env`; `ps5.env.
 | `make_icon.sh` | draws the original home-screen icon `ps5/title/sce_sys/icon0.png` |
 | `send_payload.sh ELF` | sends an ELF to elfldr (starting elfldr through pldmgr if needed) |
 | `pull_logs.sh [DIR...]` | copies `PS5_LOG_REMOTE` (or DIRs) to `research/private/ps5-logs/<time>/`, `latest` links to it |
+| `symbolize.py LOG` | names the `native self+N` frames of a PS5 thread dump (`FL_DUMP_THREADS_AT`) from `build-ps5/link/llvm-pie.elf` |
 | `upload_title.sh [DIR]` | audits, then uploads the title folder to `/data/homebrew/PPSA99642` |
 | `upload_dump.sh --i-was-asked MOUNT` | uploads a dump over FTP; only when Monty asks |
 | `build.sh copydump` + `send_payload.sh` | copies a dump from `/mnt/usbN/<folder>/Mount` to `/data/OpenHorizon2/<folder>/Mount` on the console (resumable, checks free space and sizes; log `copydump.txt`); only when Monty asks |
@@ -141,7 +142,7 @@ The PS5 binary statically links PS5_Vulkan's RADV build and link recipe, and the
 
 ### Step 6: PS5 game backend
 - [x] PS5 side of `src/platform/os/` (`src/platform/os/ps5/`): futex (umtx), files, memory (reservations + direct memory in 64 KiB units, exec via sceKernelMprotect, checked copies via sceKernelQueryMemoryProtection), thread env (sysarch GS, MXCSR 0x1f80, ids via pthread_getthreadid_np + a pthread_t registry), signal context (measured offsets), write watch (mprotect + SIGSEGV through `os::write_watch_on_fault` in the crash handler; `write_watch_before_kernel_write` before ReadFile), diagnostics. **tests/os_test.cpp: 22/22 on the console** (`build.sh os-test-title`, 2026-10-30). Audio, window, input: stubs that log UNIMPLEMENTED
-- [ ] Display (VK_KHR_display / VideoOut through DXVK), ScePad input, SceAudioOut. DXVK: built (tools/ps5/build_dxvk.sh, PS5 WSI in tools/ps5/dxvk-ps5), linked with RADV into the runtime (build.sh runtime picks it up when built), creates its D3D11 device on the console (FINDINGS 7.8); next blocker: direct memory runs out right after device creation
+- [ ] Display (VK_KHR_display / VideoOut through DXVK), ScePad input, SceAudioOut. DXVK: built (tools/ps5/build_dxvk.sh, PS5 WSI in tools/ps5/dxvk-ps5), linked with RADV into the runtime (build.sh runtime picks it up when built), creates its D3D11 device and a swap chain on the console, and the game presents (FINDINGS 7.8). Open: the title screen's 3D background is missing
 - [x] The runtime built for the PS5: `tools/ps5/build.sh runtime` (cc-win.sh for our code, PS5-target zlib and addrlib, DXVK stand-in `tools/ps5/m1/no_dxvk.cpp` until Step 5's DXVK), linked with link_title.sh; started by `tools/ps5/run_title.sh` (arguments via launch-args.txt; `--env NAME=VALUE` sets FL_LOG_FILE etc.)
 - [x] Title memory at the Xbox's fixed addresses (2026-10-30: reserved elsewhere when the exact range isn't available; PS5 address-less reservations from 64 GiB up; the game reaches D3D11CreateDevice). Was: the game reserves 0x60000000000 (12 GiB) and 0x60300000000, 0x800000000 and 0xc00000000 (4 GiB each) with type bits 0x40000000/0x30000000; a title gets nothing above 1 TiB and the low ranges are taken, then the game faults on a reserved-but-inaccessible page (rva 0x125efda). Needs an address remap or an Azimuth-style layout (FINDINGS 6) in the PS5 memory backend
 - [ ] CMakeLists.txt PS5 branch (today the PS5 build is the shell target above)
@@ -157,7 +158,7 @@ The PS5 binary statically links PS5_Vulkan's RADV build and link recipe, and the
 
 ### Milestones
 - [x] M1: launches, loads the exe, resolves imports, logs to a file I can pull (2026-10-30: `tools/ps5/build.sh runtime` + `run_title.sh`; exe mapped at 0x140000000 from /data/OpenHorizon2, imports 644/648 as on Linux, log pulled from the title's logs folder, jumped to the entry point)
-- [ ] M2: first frame on screen (TEST CARD)
+- [ ] M2: first frame on screen (TEST CARD). 2026-10-31: the title screen ("press A") shows on Monty's TV (Monty's report), the 3D background behind it is missing; DXVK swap chain 3840x2160 FIFO on VK_KHR_display, 30 fps presents. Waiting for the TEST CARD answer
 - [ ] M3: launcher on screen, finds the dump, Play starts the game (TEST CARD)
 - [ ] M4: menus with the DualSense (TEST CARD)
 - [ ] M5: drive a race (TEST CARD)

@@ -42,12 +42,20 @@ std::map<uint64_t, Block>::iterator block_at(uint64_t u) {
 bool back_run(uint64_t rs, uint64_t re) {
     size_t len = re - rs;
     int64_t phys = 0;
-    if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), len, kUnit, kDirectTypeCpu, &phys) != 0) {
+    if (int rc = sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), len, kUnit, kDirectTypeCpu, &phys)) {
+        FL_ERROR("os: commit %p+0x%zx: sceKernelAllocateDirectMemory failed (0x%x)", reinterpret_cast<void*>(rs), len, rc);
         errno = ENOMEM;
         return false;
     }
     void* va = reinterpret_cast<void*>(rs);
-    if (sceKernelMapDirectMemory(&va, len, kRead | kWrite, kMapFixed, phys, kUnit) != 0 || va != reinterpret_cast<void*>(rs)) {
+    int rc = sceKernelMapDirectMemory(&va, len, kRead | kWrite, kMapFixed, phys, kUnit);
+    if (rc != 0 || va != reinterpret_cast<void*>(rs)) {
+        void *s = nullptr, *e = nullptr;
+        uint32_t prot = 0;
+        int q = sceKernelQueryMemoryProtection(reinterpret_cast<void*>(rs), &s, &e, &prot);
+        FL_ERROR("os: commit %p+0x%zx: sceKernelMapDirectMemory(phys 0x%llx) -> 0x%x at %p (here: query 0x%x, %p-%p prot 0x%x)",
+                 reinterpret_cast<void*>(rs), len, (unsigned long long)phys, rc, va, q, s, e, prot);
+        if (rc == 0) sceKernelMunmap(va, len);
         sceKernelReleaseDirectMemory(phys, len);
         errno = ENOMEM;
         return false;
@@ -94,6 +102,30 @@ void* reserve_anywhere(size_t size, size_t align) {
     return nullptr;
 }
 
+// Whether direct memory maps at unit address `at`, inside a reservation of
+// ours. A title can't map it everywhere it can reserve: 0x917440000 gave
+// EINVAL (FINDINGS 7.8). A refused map leaves the reservation as it was; a
+// successful test map is undone and the unit reserved again.
+bool direct_mappable(uint64_t at) {
+    int64_t phys = 0;
+    if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), kUnit, kUnit, kDirectTypeCpu, &phys) != 0)
+        return true;  // can't tell now: commit() reports it if it fails
+    void* va = reinterpret_cast<void*>(at);
+    int rc = sceKernelMapDirectMemory(&va, kUnit, kRead | kWrite, kMapFixed, phys, kUnit);
+    bool here = rc == 0 && va == reinterpret_cast<void*>(at);
+    if (rc == 0) sceKernelMunmap(va, kUnit);
+    sceKernelReleaseDirectMemory(phys, kUnit);
+    if (!here) return false;
+    void* a = reinterpret_cast<void*>(at);
+    rc = sceKernelReserveVirtualRange(&a, kUnit, 0, kPage);
+    if (rc != 0 || a != reinterpret_cast<void*>(at)) {
+        FL_ERROR("os: lost the reservation at %p after a test map", reinterpret_cast<void*>(at));
+        if (rc == 0) sceKernelMunmap(a, kUnit);
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 size_t page_size() { return kPage; }
@@ -116,6 +148,15 @@ void* map_anon(void* want, size_t size, unsigned prot, size_t align) {
         sceKernelMunmap(a, size);
         errno = EEXIST;
         return nullptr;
+    }
+    if (want) {
+        uint64_t first = reinterpret_cast<uint64_t>(want), last = first + size - kUnit;
+        if (!direct_mappable(first) || (last != first && !direct_mappable(last))) {
+            FL_LOG(memory, "os: %p+0x%zx can be reserved but not backed here", want, size);
+            sceKernelMunmap(a, size);
+            errno = EINVAL;
+            return nullptr;
+        }
     }
     if (prot != kNone && !commit(a, size, prot)) {
         release(a, size);
@@ -140,7 +181,7 @@ bool commit(void* addr, size_t size, unsigned prot) {
             int64_t phys = 0;
             size_t largest = 0;
             sceKernelAvailableDirectMemorySize(0, sceKernelGetDirectMemorySize(), kUnit, &phys, &largest);
-            FL_ERROR("os: commit %p+0x%llx: no direct memory (we hold %llu MiB; largest free block %zu MiB of %lld MiB)",
+            FL_ERROR("os: commit %p+0x%llx failed (we hold %llu MiB; largest free block %zu MiB of %lld MiB)",
                      reinterpret_cast<void*>(u), (unsigned long long)(re - u), (unsigned long long)(g_committed.load() >> 20),
                      largest >> 20, (long long)(sceKernelGetDirectMemorySize() >> 20));
             return false;

@@ -11,9 +11,12 @@
 #include <map>
 #include <memory>
 #include <shared_mutex>
+#include <ctime>
 
+#include "common/log.h"
 #include "platform/os/memory.h"
 #include "platform/os/ps5/kernel.h"
+#include "platform/os/thread.h"
 
 namespace fl::os {
 using namespace ps5;
@@ -25,6 +28,15 @@ struct Range {
 };
 std::shared_mutex g_mu;
 std::map<uint64_t, Range> g_ranges;  // start -> range, never overlapping
+std::atomic<uint64_t> g_writer{0};   // thread holding g_mu exclusively (for fault reports)
+thread_local int t_readers = 0;      // shared locks of g_mu this thread holds
+
+// A shared lock of g_mu that also counts this thread as a reader.
+struct ReadLock {
+    std::shared_lock<std::shared_mutex> lock{g_mu};
+    ReadLock() { t_readers++; }
+    ~ReadLock() { t_readers--; }
+};
 
 // The range holding addr, or end(). Caller holds g_mu.
 std::map<uint64_t, Range>::iterator range_at(uint64_t addr) {
@@ -56,19 +68,19 @@ bool write_watch_init() { return true; }
 
 bool write_watch_register(uint64_t start, uint64_t end) {
     std::unique_lock lock(g_mu);
+    g_writer = thread_id();
+    struct Clear { ~Clear() { g_writer = 0; } } clear;
     auto it = range_at(start);
-    if (it != g_ranges.end() && it->first == start && it->second.end == end) return true;
+    if (it != g_ranges.end()) {
+        if (it->first == start && it->second.end == end) return true;
+        start = it->first;  // the range holding start: the loop below merges it
+    }
     // Merge with every range it touches; everything in the result reads as written.
     for (auto o = g_ranges.lower_bound(start > kPage ? start - kPage : 0); o != g_ranges.end() && o->first <= end;) {
         if (o->second.end < start) { ++o; continue; }
         start = std::min(start, o->first);
         end = std::max(end, o->second.end);
         o = g_ranges.erase(o);
-    }
-    if (it != g_ranges.end() && it->first <= start) {
-        start = std::min(start, it->first);
-        end = std::max(end, it->second.end);
-        g_ranges.erase(it);
     }
     size_t pages = (end - start) / kPage;
     Range r{end, std::make_unique<std::atomic<uint8_t>[]>(pages)};
@@ -80,7 +92,7 @@ bool write_watch_register(uint64_t start, uint64_t end) {
 }
 
 bool write_watch_reset(uint64_t start, uint64_t end, bool strict, WrittenFn on_written, void* user, size_t* calls) {
-    std::shared_lock lock(g_mu);
+    ReadLock lock;
     uint64_t run = 0, run_end = 0;
     size_t n_calls = 0;
     auto flush = [&] {
@@ -109,7 +121,7 @@ bool write_watch_reset(uint64_t start, uint64_t end, bool strict, WrittenFn on_w
 }
 
 bool write_watch_written(uint64_t start, uint64_t end) {
-    std::shared_lock lock(g_mu);
+    ReadLock lock;
     bool any = false;
     bool all = each_page(start, end, [&](uint64_t, std::atomic<uint8_t>& w) { any |= w.load() != 0; });
     return any || !all;
@@ -118,7 +130,20 @@ bool write_watch_written(uint64_t start, uint64_t end) {
 bool write_watch_on_fault(uint64_t addr, bool) {
     // Watched pages stay readable, so a fault in a watched range is a write
     // (no need for the error-code bit, whose offset wasn't measured).
-    std::shared_lock lock(g_mu);
+    // A thread that faults while it holds g_mu (or while a writer waits and
+    // it already reads) would wait for itself: give up after 2 s and let the
+    // crash report say where it faulted.
+    std::shared_lock lock(g_mu, std::defer_lock);
+    for (int ms = 0; !lock.try_lock(); ms++) {
+        if (ms == 2000) {
+            FL_ERROR("os: write watch: fault at %p while its lock is held (writer thread %llu, this thread %llu, "
+                     "reading %d)", reinterpret_cast<void*>(addr), (unsigned long long)g_writer.load(),
+                     (unsigned long long)thread_id(), t_readers);
+            return false;
+        }
+        timespec t{0, 1000000};
+        nanosleep(&t, nullptr);
+    }
     auto it = range_at(addr);
     if (it == g_ranges.end()) return false;
     uint64_t p = addr & ~(kPage - 1);
@@ -132,7 +157,7 @@ void write_watch_before_kernel_write(void* addr, size_t size) {
 }
 
 void ps5::write_watch_unprotect(uint64_t start, uint64_t end) {
-    std::shared_lock lock(g_mu);
+    ReadLock lock;
     each_page(start & ~(kPage - 1), end, [&](uint64_t p, std::atomic<uint8_t>& w) {
         if (!w.exchange(1)) protect(reinterpret_cast<void*>(p), kPage, kRead | kWrite);
     });

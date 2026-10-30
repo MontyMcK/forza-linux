@@ -11,6 +11,7 @@
 
 #include <csignal>
 #include <cstdarg>
+#include <cstdlib>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -238,6 +239,12 @@ void dump_append(size_t& n, const char* fmt, ...) {
     if (w > 0) n += size_t(w);
 }
 
+// Our own code that dladdr can't name (all of it in the PS5's static title):
+// printed as an offset from note_present, whose address the dump header gives
+// (tools/ps5/symbolize.sh turns these into names).
+int64_t self_offset(uint64_t v) { return int64_t(v - reinterpret_cast<uint64_t>(&note_present)); }
+bool near_self(uint64_t v) { return v > 0x10000 && llabs(self_offset(v)) < (64ll << 20); }
+
 void dump_handler(int, siginfo_t*, void* uc_) {
     os::Regs g(uc_);
     size_t n = 0;
@@ -272,12 +279,15 @@ void dump_handler(int, siginfo_t*, void* uc_) {
             if (img.base && img.contains(reinterpret_cast<void*>(v))) {
                 dump_append(n, "    stack[%zu] game rva 0x%llx\n", i, (unsigned long long)(v - base));
                 game++;
-            } else if (native < 6 && game == 0 && v > 0x10000) {
+            } else if (native < 12 && game == 0 && v > 0x10000) {
                 Dl_info di{};
                 if (dladdr(reinterpret_cast<void*>(v), &di) && di.dli_fname && di.dli_sname &&
                     v - reinterpret_cast<uint64_t>(di.dli_fbase) < (1ull << 28)) {
                     describe(d, sizeof d, v);
                     dump_append(n, "    stack[%zu] native %s\n", i, d);
+                    native++;
+                } else if (near_self(v)) {
+                    dump_append(n, "    stack[%zu] native self%+lld\n", i, (long long)self_offset(v));
                     native++;
                 }
             }
@@ -290,7 +300,7 @@ void dump_threads() {
     const uint64_t self = os::thread_id();
     std::vector<os::ThreadInfo> threads = os::list_threads();
     if (threads.empty()) return;
-    fl::log_write("threads", "==== thread dump");
+    fl::log_write("threads", "==== thread dump (self = note_present at %p)", reinterpret_cast<void*>(&note_present));
     peek_globals();
     for (const os::ThreadInfo& t : threads) {
         if (t.tid == self) continue;

@@ -15,6 +15,7 @@
 #include "platform/os/memory.h"
 #include "platform/os/signal_context.h"
 #include "platform/os/thread.h"
+#include "platform/os/write_watch.h"
 
 #include <csignal>
 
@@ -119,6 +120,18 @@ int main() {
     check(ok && reinterpret_cast<int (*)()>(code)() == 42, "protect adds execute to written code");
     os::release(code, page);
     check(os::resident_bytes() > 0, "resident_bytes");
+
+    // Write watching: registering a range that starts inside a watched one
+    // merges them (the PS5 backend once erased one map entry twice here).
+    auto* ww = static_cast<uint8_t*>(os::map_anon(nullptr, 6 * page, os::kRead | os::kWrite));
+    uint64_t w0 = reinterpret_cast<uint64_t>(ww);
+    size_t runs = 0;
+    auto count = [](uint64_t, uint64_t, void* n) { ++*static_cast<size_t*>(n); };
+    ok = ww && os::write_watch_init() && os::write_watch_register(w0, w0 + 4 * page) &&
+         os::write_watch_register(w0 + page, w0 + 6 * page) && os::write_watch_register(w0 + 2 * page, w0 + 3 * page);
+    ok = ok && os::write_watch_reset(w0, w0 + 6 * page, true, count, &runs) && runs >= 1 &&
+         !os::write_watch_written(w0, w0 + 6 * page);
+    check(ok, "write watch: overlapping registrations merge into one watched range");
 
     // Checked copies stop at memory they can't access.
     auto* two = static_cast<uint8_t*>(os::map_anon(nullptr, 2 * page, os::kRead | os::kWrite));
