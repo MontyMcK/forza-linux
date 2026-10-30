@@ -371,3 +371,13 @@ Next: Step 4's memory area (reserve/commit/protect/exec/page size: src/hle/kerne
 - Monty will copy the dump from the USB stick to the PS5's internal storage, and starts elfldr after each jailbreak. ps5.env and PS5_PORT.md updated; the dump path on the console is still to be confirmed with Monty.
 
 Next: unchanged (Step 4 memory area; Step 3b title probe).
+
+## 2026-10-30 (night): Claude: dump on the console, title toolchain, Step 4 complete
+
+- Monty's dump: copied on the console from the USB stick to `/data/OpenHorizon2/Anthem_1.0.0.64_x64__8wekyb3d8bbwe/Mount` with our `oh2copydump` payload (Monty asked; 1474 s, 27 MiB/s); all 2323 sizes match the PC copy, checked on the console and again over FTP.
+- Title toolchain (Step 5 start): `tools/ps5/setup_deps.sh` (pinned PS5_Vulkan f410e67 + its SDK fork b83202b and PS5_Mesa 1ba9874 in build-ps5/deps), `cc.sh`, `link_title.sh`, `package.sh` (stage, audit, build), `ps5/title/sce_sys` (PPSA99642 param.json, original icon from `make_icon.sh`). The probe builds as a title (`build.sh probe-title`); `build.sh launch` is a payload that starts the title. PS5_Vulkan's own skeleton build at f410e67 misses libps5platform.a (ps5_fp_ieee undefined); our link adds it.
+- Uploaded the probe title: ShadowMount+ found "Open Horizon 2" but registration failed ("AppInstallAll hook is no longer installed / TitleDir bridge unavailable", gave up after 2 retries), the same as on 2026-10-04. Fix: a full PS5 restart + jailbreak + elfldr (asked Monty). The FTP outage at 19:46 was not a reboot (SM+ kept its 17:02 session).
+- Step 4 complete: src/platform/os/ (futex, files, memory incl. checked copies, thread env, signal context, audio, window, input/controller output, write watch, diagnostics) with the Linux backend as the `fl_os` library; nothing outside os/linux uses SDL, /proc, <linux/...>, raw syscall() or the ucontext layout. tests/os_test.cpp (24 checks) is the backend contract. Every slice passed the Linux check (tests + frame 1500; FL_LOG=fps, FL_CPU_PROFILE and FL_DUMP_THREADS_AT where they exercise the moved code). Behaviour note: VirtualAlloc at a fixed address no longer over-maps 64 KiB past the end (it failed if that extra space was taken).
+- Started: PS5_Vulkan's RADV release build (build-ps5/radv-release.log; mako/markupsafe in build-ps5/deps/pymods via PS5VK_MAKO_PATH).
+
+Next: after Monty's restart, check SM+ registered PPSA99642 (/data/shadowmount/debug.log), then `tools/ps5/send_payload.sh build-ps5/launch/oh2launch.elf` and pull `probe-title.txt` (logs folder or /download0) for Step 3b. Then Step 5: cmake/ps5.cmake, static DXVK with a VK_KHR_display WSI, FFmpeg XMA, addrlib; Step 6: the PS5 backend of src/platform/os/ (must pass os_test on the console).
