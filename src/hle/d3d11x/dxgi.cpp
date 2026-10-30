@@ -27,6 +27,7 @@
 #include "hle/d3d11x/dxvk.h"
 #include "hle/registry.h"
 #include "platform/os/window.h"
+#include "platform/os/process.h"
 
 namespace fl::d3d {
 namespace {
@@ -411,7 +412,7 @@ WINAPI HRESULT sc_Present(Iface* self, UINT sync, UINT flags) {
     placement_frame_scan();
     if (exit_after && sc->frame >= exit_after) {
         log_write("d3d", "FL_EXIT_AFTER_FRAME=%llu reached", (unsigned long long)exit_after);
-        _exit(0);
+        os::exit_process(0);
     }
     return hr;
 }

@@ -29,6 +29,7 @@
 #include "platform/os/signal_context.h"
 #include "platform/os/debug.h"
 #include "platform/os/write_watch.h"
+#include "platform/os/process.h"
 
 namespace fl::loader {
 namespace {
@@ -143,7 +144,7 @@ void handler(int sig, siginfo_t* si, void* uc_) {
             describe(rip, sizeof rip, g[os::kRip]);
             fl::log_write("FATAL", "UNIMPLEMENTED data import %s!%s (touched at rip %s)", t.dll.c_str(),
                           t.name.c_str(), rip);
-            _exit(134);
+            os::exit_now(134);
         }
     }
 

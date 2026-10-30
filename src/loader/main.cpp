@@ -17,6 +17,7 @@
 #include "loader/pe_image.h"
 #include "loader/thread_env.h"
 #include "platform/os/thread.h"
+#include "platform/os/process.h"
 
 namespace fl {
 
@@ -36,7 +37,7 @@ void usage(const char* argv0) {
             "env: FL_LOG=all|chan,...  FL_LOG_FILE=path  FL_TRACE_IMPORTS=1|all\n"
             "     FL_FRAME_PACING=console|dynamic|off  FL_FPS_CAP=<fps> (dynamic)\n",
             argv0);
-    exit(2);
+    os::exit_process(2);
 }
 
 // --env NAME=VALUE (repeatable) sets an environment variable before anything
@@ -104,7 +105,7 @@ void* game_main_thread(void*) {
     log_write("loader", "jumping to game entry point %p", reinterpret_cast<void*>(entry));
     int rc = entry();
     log_write("loader", "game entry point returned %d", rc);
-    exit(rc);
+    os::exit_process(rc);
 }
 
 }  // namespace
@@ -112,6 +113,17 @@ void* game_main_thread(void*) {
 
 int main(int argc, char** argv) {
     using namespace fl;
+    // Started with no arguments (a PS5 title from the home screen): use the
+    // saved ones (os::saved_args).
+    std::vector<std::string> saved;
+    std::vector<char*> saved_argv;
+    if (argc <= 1 && !(saved = os::saved_args()).empty()) {
+        saved_argv.push_back(argv[0]);
+        for (std::string& a : saved) saved_argv.push_back(a.data());
+        saved_argv.push_back(nullptr);
+        argc = static_cast<int>(saved_argv.size()) - 1;
+        argv = saved_argv.data();
+    }
     apply_env_args(argc, argv);
     // dxvk-native refuses to start without a WSI choice. Set it before any
     // game thread exists (setenv is not thread-safe).

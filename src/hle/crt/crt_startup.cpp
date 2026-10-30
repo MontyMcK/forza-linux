@@ -10,6 +10,7 @@
 #include "common/log.h"
 #include "common/winabi.h"
 #include "hle/registry.h"
+#include "platform/os/process.h"
 
 namespace fl::crt {
 namespace {
@@ -99,12 +100,12 @@ WINAPI OnExit c_dllonexit(OnExit fn, PVFV** begin, PVFV** end) { return c_onexit
     run_onexit();
     fflush(stdout);
     fflush(stderr);
-    _exit(code);
+    os::exit_process(code);
 }
 
 [[noreturn]] WINAPI void c__exit(int code) {
     fl::log_write("crt", "game called _exit(%d)", code);
-    _exit(code);
+    os::exit_process(code);
 }
 
 WINAPI void c_cexit() { run_onexit(); }
