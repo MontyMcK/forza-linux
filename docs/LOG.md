@@ -429,3 +429,8 @@ Where things stand (Monty asked for a handoff):
 - Next run hung with no log: a PS5 write-watch bug (double erase in the merge of `write_watch_register`, then a self-deadlock in the fault hook). Found with `FL_DUMP_THREADS_AT` plus the new `tools/ps5/symbolize.py`; fixed, os_test check added (Linux 23/23; not yet rerun on the console).
 - Result: DXVK swap chain on the PS5 display, presents at 30 fps; Monty's TV shows the title screen ("press A") but not the 3D background behind it. Linux check: build, os_test, gcn_layout_test, concrt_token_test pass, FL_EXIT_AFTER_FRAME=600 reached.
 - **Next:** Monty answers the M2 TEST CARD; on a pass merge ps5-test into ps5 and tag ps5-M2. Then the missing background: compare a Linux and a PS5 run of the title screen with FL_LOG=d3d,shaders,upload (draw counts per frame: FL_LOG=fps gives dxvk per-frame draws/passes; on Linux at the title screen vs. the PS5), look for PS5-only errors in _d3d11.log, then M3 (launcher) and M4 (ScePad).
+
+## 2026-10-31: Claude: DualSense input (M4 work, before M3)
+
+- Monty couldn't press A at the title screen, so the controller came first: src/platform/os/ps5/input.cpp reads ScePad (FINDINGS 7.9). On the console the pad opened and Monty's Cross presses reached the game as A; the game moved on ~4 s after the presses (new thread, XAudio2 lookup).
+- M2 TEST CARD still unanswered. **Next:** Monty reports what happens after A; Linux baseline of the title screen with FL_LOG=fps (draws per frame) to chase the missing 3D background (PS5: 2 draws, 0 command lists per frame there).

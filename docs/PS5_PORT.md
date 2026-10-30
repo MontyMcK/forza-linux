@@ -160,7 +160,7 @@ The PS5 binary statically links PS5_Vulkan's RADV build and link recipe, and the
 - [x] M1: launches, loads the exe, resolves imports, logs to a file I can pull (2026-10-30: `tools/ps5/build.sh runtime` + `run_title.sh`; exe mapped at 0x140000000 from /data/OpenHorizon2, imports 644/648 as on Linux, log pulled from the title's logs folder, jumped to the entry point)
 - [ ] M2: first frame on screen (TEST CARD). 2026-10-31: the title screen ("press A") shows on Monty's TV (Monty's report), the 3D background behind it is missing; DXVK swap chain 3840x2160 FIFO on VK_KHR_display, 30 fps presents. Waiting for the TEST CARD answer
 - [ ] M3: launcher on screen, finds the dump, Play starts the game (TEST CARD)
-- [ ] M4: menus with the DualSense (TEST CARD)
+- [ ] M4: menus with the DualSense (TEST CARD). 2026-10-31 (done before M3, Monty asked): src/platform/os/ps5/input.cpp (ScePad), the game reads Cross as A; rumble on, trigger rumble is M8
 - [ ] M5: drive a race (TEST CARD)
 - [ ] M6: audio (TEST CARD)
 - [ ] M7: a save survives a restart; launcher save backup/restore (TEST CARD)
