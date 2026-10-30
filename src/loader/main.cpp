@@ -16,6 +16,9 @@
 #include "loader/imports.h"
 #include "loader/pe_image.h"
 #include "loader/thread_env.h"
+#include "platform/os/thread.h"
+#include "platform/os/process.h"
+#include "platform/os/window.h"
 
 namespace fl {
 
@@ -31,11 +34,23 @@ constexpr size_t kMainStackSize = 64ull << 20;  // the game's main thread does h
 
 void usage(const char* argv0) {
     fprintf(stderr,
-            "usage: %s --game-dir <path to the dump's Mount/ folder> [--exe <name>] [-- <game options>...]\n"
+            "usage: %s --game-dir <path to the dump's Mount/ folder> [--exe <name>] [--env NAME=VALUE]... [-- <game options>...]\n"
             "env: FL_LOG=all|chan,...  FL_LOG_FILE=path  FL_TRACE_IMPORTS=1|all\n"
             "     FL_FRAME_PACING=console|dynamic|off  FL_FPS_CAP=<fps> (dynamic)\n",
             argv0);
-    exit(2);
+    os::exit_process(2);
+}
+
+// --env NAME=VALUE (repeatable) sets an environment variable before anything
+// reads one: a PS5 title has no environment, so its launcher passes FL_LOG_FILE
+// and the other settings this way.
+void apply_env_args(int argc, char** argv) {
+    for (int i = 1; i + 1 < argc; i++) {
+        if (strcmp(argv[i], "--env") != 0) continue;
+        std::string kv = argv[++i];
+        size_t eq = kv.find('=');
+        if (eq != std::string::npos) setenv(kv.substr(0, eq).c_str(), kv.c_str() + eq + 1, 1);
+    }
 }
 
 void parse_args(int argc, char** argv) {
@@ -46,6 +61,8 @@ void parse_args(int argc, char** argv) {
             c.game_dir = argv[++i];
         else if (!strcmp(argv[i], "--exe") && i + 1 < argc)
             exe = argv[++i];
+        else if (!strcmp(argv[i], "--env") && i + 1 < argc)
+            ++i;  // applied by apply_env_args()
         else if (!strcmp(argv[i], "--")) {
             for (i++; i < argc; i++) c.game_args.push_back(argv[i]);
         } else
@@ -78,12 +95,9 @@ void parse_args(int argc, char** argv) {
 using EntryPoint = int(WINAPI*)();
 
 void* game_main_thread(void*) {
-    pthread_attr_t attr;
     void* stack_lo;
     size_t stack_size;
-    pthread_getattr_np(pthread_self(), &attr);
-    pthread_attr_getstack(&attr, &stack_lo, &stack_size);
-    pthread_attr_destroy(&attr);
+    os::current_stack(&stack_lo, &stack_size);
 
     loader::attach_thread(stack_lo, static_cast<uint8_t*>(stack_lo) + stack_size, /*main_thread=*/true);
     auto& img = loader::main_image();
@@ -92,7 +106,7 @@ void* game_main_thread(void*) {
     log_write("loader", "jumping to game entry point %p", reinterpret_cast<void*>(entry));
     int rc = entry();
     log_write("loader", "game entry point returned %d", rc);
-    exit(rc);
+    os::exit_process(rc);
 }
 
 }  // namespace
@@ -100,9 +114,21 @@ void* game_main_thread(void*) {
 
 int main(int argc, char** argv) {
     using namespace fl;
+    // Started with no arguments (a PS5 title from the home screen): use the
+    // saved ones (os::saved_args).
+    std::vector<std::string> saved;
+    std::vector<char*> saved_argv;
+    if (argc <= 1 && !(saved = os::saved_args()).empty()) {
+        saved_argv.push_back(argv[0]);
+        for (std::string& a : saved) saved_argv.push_back(a.data());
+        saved_argv.push_back(nullptr);
+        argc = static_cast<int>(saved_argv.size()) - 1;
+        argv = saved_argv.data();
+    }
+    apply_env_args(argc, argv);
     // dxvk-native refuses to start without a WSI choice. Set it before any
     // game thread exists (setenv is not thread-safe).
-    setenv("DXVK_WSI_DRIVER", "SDL3", 0);
+    setenv("DXVK_WSI_DRIVER", os::dxvk_wsi_driver(), 0);
     log_init();
     parse_args(argc, argv);
     loader::install_crash_handler();

@@ -70,7 +70,10 @@ Add a line whenever a decision is made: `- YYYY-MM-DD: decision, reason`.
 - 2026-10-24: xg_x is reimplemented on AMD addrlib (vendored from Mesa, MIT) configured with the console's tile tables. Reason: assets are pre-tiled, so layouts must match the console's XG byte for byte; addrlib is what XG itself is built on.
 - 2026-10-25: Azimuth (a proprietary Windows launcher that runs this game on D3D12) is studied as a behaviour reference under Rule 1, like the Microsoft DLLs: facts only, no code. Reason: the user asked for it, and it documents (via its strings and RTTI) exactly the subsystems we're blocked on.
 - 2026-10-24: Package DLLs (Microsoft.Xbox.Services/GameChat/Input.Wheel from Mount/) are loaded and run, not reimplemented. Reason: they're the game's own dependencies and need only runtime imports we implement anyway; Xbox Live then runs offline.
-- 2026-10-30: Project license: **GPL-3.0-or-later** (LICENSE, README). Monty chose GPL-3 so builds that link GPL-3.0-or-later code (the PS5 port's driver and SDK) can be shared. Code we take in must be GPL-3-compatible (MIT, zlib, BSD, LGPL-2.1+, GPL-3.0+; not GPL-2.0-only). Before this the repo (public since 2026-10-25) had no license.
+- 2026-10-30: PS5 port (docs/PS5_PORT.md, branches ps5-test/ps5): one homebrew title PPSA99642 holding launcher + runtime, rendering through PS5_Vulkan's RADV (statically linked) with DXVK. Reason: Monty asked; PS5_Vulkan is the only Vulkan driver for titles and proven with real apps.
+- 2026-10-30: PS5 payloads go through elfldr v0.27 (installed into pldmgr at Monty's request, started on demand by tools/ps5/send_payload.sh). Reason: pldmgr only loads payloads from its own folders.
+- 2026-10-30: `tools/check_no_game_data.sh --package DIR` audits every PS5 package and upload against a live listing of game_data/ (name+size, byte compare on size matches). Reason: Rule 0 covers builds and downloads, not just git.
+- 2026-10-30: Project license: **GPL-3.0-or-later** (LICENSE, README). Monty chose GPL-3 so PS5 builds, which link GPL-3.0-or-later PS5_Vulkan and the payload SDK, can be shared. Code we take in must be GPL-3-compatible (MIT, zlib, BSD, LGPL-2.1+, GPL-3.0+; not GPL-2.0-only). Before this the repo (public since 2026-10-25) had no license.
 
 ---
 
@@ -229,6 +232,7 @@ Azimuth runs the game because the GPU reads the game's memory directly. Our copy
 - [ ] Performance: profile with `perf` (the game code shows up as anonymous memory, so add a perf map file `/tmp/perf-<pid>.map` with RTTI names)
 - [ ] Packaging: `forza-linux --game-dir /path/to/Mount`, plus `tools/extract_dump.sh`. A user supplies their own dump, and nothing from the game ships.
 - [ ] Optional: online and Live features stay stubbed
+- [ ] PS5 port: tracked in docs/PS5_PORT.md (its own checklist and milestones M1-M8)
 
 ---
 

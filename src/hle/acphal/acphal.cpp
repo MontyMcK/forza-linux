@@ -11,7 +11,6 @@
 // shape.cpp; XMA is decoded with FFmpeg when tools/build_ffmpeg_xma.sh has
 // been run, otherwise consumed as silence (STUB).
 
-#include <sys/mman.h>
 
 #include <atomic>
 #include <chrono>
@@ -28,6 +27,7 @@
 #include "common/winabi.h"
 #include "hle/acphal/shape.h"
 #include "hle/registry.h"
+#include "platform/os/memory.h"
 
 namespace fl::acphal {
 namespace {
@@ -81,8 +81,8 @@ void ensure_heaps() {
     uint32_t apu = 0x10000000;  // arbitrary non-zero device address base
     for (int i = 0; i < 2; i++) {
         uint32_t sz = (sizes[i] + 0xFFFF) & ~0xFFFFu;
-        void* p = mmap(nullptr, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (p == MAP_FAILED) fl::fatal("ApuCreateHeap: mmap(%u) failed", sz);
+        void* p = os::map_anon(nullptr, sz, os::kRead | os::kWrite);
+        if (!p) fl::fatal("ApuCreateHeap: mmap(%u) failed", sz);
         g_heaps[i].base = static_cast<uint8_t*>(p);
         g_heaps[i].apu_base = apu;
         g_heaps[i].size = sz;

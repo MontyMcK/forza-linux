@@ -16,6 +16,7 @@
 #include "hle/registry.h"
 #include "loader/imports.h"
 #include "loader/thread_env.h"
+#include "platform/os/clock.h"
 
 namespace fl::kx {
 namespace {
@@ -72,17 +73,11 @@ void trace_time_caller(void* ret) {
 
 WINAPI BOOL kx_QueryPerformanceCounter(LARGE_INTEGER* c) {
     trace_time_caller(__builtin_return_address(0));
-    timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    c->QuadPart = static_cast<LONGLONG>(ts.tv_sec) * 10000000 + ts.tv_nsec / 100;
+    c->QuadPart = static_cast<LONGLONG>(os::monotonic_ns() / 100);
     return TRUE_;
 }
 
-WINAPI uint64_t kx_GetTickCount64() {
-    timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return static_cast<uint64_t>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
-}
+WINAPI uint64_t kx_GetTickCount64() { return os::monotonic_ns() / 1000000; }
 
 WINAPI DWORD kx_GetTickCount() { return static_cast<DWORD>(kx_GetTickCount64()); }
 

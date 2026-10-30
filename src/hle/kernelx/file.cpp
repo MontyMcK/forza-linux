@@ -9,12 +9,13 @@
 #include <algorithm>
 #include <cerrno>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <mutex>
 #include <dirent.h>
 #include <fcntl.h>
 #include <filesystem>
-#include <fnmatch.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
@@ -27,9 +28,33 @@
 #include "hle/kernelx/sync_objects.h"
 #include "hle/kernelx/vfs.h"
 #include "hle/registry.h"
+#include "platform/os/files.h"
+#include "platform/os/write_watch.h"
 
 namespace fl::kx {
 namespace {
+
+// FindFirstFile patterns: '*' any run, '?' any one character, case-insensitive
+// (Windows has no [...] classes; fnmatch isn't available to a PS5 title).
+bool wildcard_match(const char* p, const char* s) {
+    const char *star = nullptr, *resume = nullptr;
+    while (*s) {
+        if (*p == '?' || (*p && *p != '*' && tolower(static_cast<unsigned char>(*p)) == tolower(static_cast<unsigned char>(*s)))) {
+            p++;
+            s++;
+        } else if (*p == '*') {
+            star = p++;
+            resume = s;
+        } else if (star) {
+            p = star + 1;
+            s = ++resume;
+        } else {
+            return false;
+        }
+    }
+    while (*p == '*') p++;
+    return !*p;
+}
 
 constexpr DWORD GENERIC_READ = 0x80000000;
 constexpr DWORD GENERIC_WRITE = 0x40000000;
@@ -74,15 +99,102 @@ struct Iocp : KObject {
 
 struct File : KObject {
     File() : KObject(ObjType::File) {}
-    ~File() override {
-        if (fd >= 0) close(fd);
-    }
-    int fd = -1;
+    ~File() override;
+    int fd = -1;            // -1 while a pooled file's descriptor is closed
+    bool pooled = false;    // read-only: its descriptor comes from the pool (FdPool)
+    int users = 0;          // pooled: I/O calls using fd now (guarded by g_pool_mutex)
+    uint64_t last_use = 0;  // pooled: for evicting the least recently used
+    std::mutex pos_mutex;   // synchronous I/O on one handle is serialized, as on Windows
+    int64_t pos = 0;        // the handle's file pointer
     bool overlapped = false;
     std::string path;
     std::shared_ptr<Iocp> port;
     ULONG_PTR key = 0;
 };
+
+// Read-only files share os::open_file_budget() host descriptors: the game
+// keeps ~420 files open, more than a PS5 title may. A pooled File keeps its
+// path and is reopened when its descriptor was closed for another file.
+std::mutex g_pool_mutex;
+std::vector<File*> g_pool_open;  // pooled Files whose fd is open
+uint64_t g_pool_tick = 0;
+
+// FL_OPEN_FILE_BUDGET=<n> (tests): a smaller pool, to exercise reopening on Linux.
+size_t pool_budget() {
+    static const size_t n = [] {
+        const char* e = getenv("FL_OPEN_FILE_BUDGET");
+        return e ? size_t(std::max(1, atoi(e))) : size_t(os::open_file_budget());
+    }();
+    return n;
+}
+
+// FL_LOG=fps: how often the pool reopens files and what that costs (an
+// open() is slow on some hosts); single opens over 20 ms are logged.
+void note_reopen(double seconds, const std::string& path) {
+    static uint64_t count = 0;
+    static double total = 0, worst = 0, since = run_time();
+    if (!log_enabled("fps")) return;
+    count++, total += seconds, worst = std::max(worst, seconds);
+    if (seconds > 0.02) log_write("fps", "file pool: reopening %s took %.1f ms", path.c_str(), seconds * 1000);
+    if (run_time() - since >= 10) {
+        log_write("fps", "file pool: %llu reopens in %.1f s, open() %.2f ms average, %.1f ms worst",
+                  (unsigned long long)count, run_time() - since, total / count * 1000, worst * 1000);
+        count = 0, total = 0, worst = 0, since = run_time();
+    }
+}
+
+// Adds f (its fd just opened) to the pool and, over the budget, closes the
+// least recently used idle one (if every one is busy, the pool stays over for
+// now). Caller holds g_pool_mutex.
+void pool_add(File* f) {
+    f->last_use = ++g_pool_tick;
+    g_pool_open.push_back(f);
+    if (g_pool_open.size() <= pool_budget()) return;
+    File* lru = nullptr;
+    for (File* o : g_pool_open)
+        if (o != f && o->users == 0 && (!lru || o->last_use < lru->last_use)) lru = o;
+    if (!lru) return;
+    close(lru->fd);
+    lru->fd = -1;
+    g_pool_open.erase(std::find(g_pool_open.begin(), g_pool_open.end(), lru));
+}
+
+// The descriptor of f for one I/O call (-1 and errno if it can't be reopened).
+struct HostFd {
+    File& f;
+    int fd;
+    explicit HostFd(File& file) : f(file), fd(file.fd) {
+        if (!f.pooled) return;
+        std::lock_guard lock(g_pool_mutex);
+        if (f.fd < 0) {
+            double t0 = run_time();
+            f.fd = open(f.path.c_str(), O_RDONLY | O_CLOEXEC);
+            note_reopen(run_time() - t0, f.path);
+            if (f.fd < 0) {
+                FL_ERROR("file: reopening %s failed: %s", f.path.c_str(), strerror(errno));
+                fd = -1;
+                return;
+            }
+            pool_add(&f);
+        }
+        f.users++;
+        f.last_use = ++g_pool_tick;
+        fd = f.fd;
+    }
+    ~HostFd() {
+        if (!f.pooled || fd < 0) return;
+        std::lock_guard lock(g_pool_mutex);
+        f.users--;
+    }
+};
+
+File::~File() {
+    if (pooled) {
+        std::lock_guard lock(g_pool_mutex);
+        if (fd >= 0) g_pool_open.erase(std::find(g_pool_open.begin(), g_pool_open.end(), this));
+    }
+    if (fd >= 0) close(fd);
+}
 
 DWORD errno_to_win(int e) {
     switch (e) {
@@ -165,6 +277,11 @@ HANDLE open_file(const std::string& win, DWORD access, DWORD disposition, DWORD 
     if (fd < 0) {
         int e = errno;
         FL_LOG(file, "open '%s' -> %s FAILED (%s)", win.c_str(), host.c_str(), strerror(e));
+        if (e == EMFILE) {
+            std::lock_guard lock(g_pool_mutex);
+            FL_ERROR("file: out of descriptors opening %s (%zu pooled read-only files open)", host.c_str(),
+                     g_pool_open.size());
+        }
         set_last_error(errno_to_win(e));
         return INVALID_HANDLE_VALUE;
     }
@@ -172,6 +289,11 @@ HANDLE open_file(const std::string& win, DWORD access, DWORD disposition, DWORD 
     f->fd = fd;
     f->overlapped = flags & FILE_FLAG_OVERLAPPED;
     f->path = host;
+    if (oflags == O_RDONLY && !(existed && S_ISDIR(st.st_mode))) {
+        f->pooled = true;
+        std::lock_guard lock(g_pool_mutex);
+        pool_add(f.get());
+    }
     FL_LOG(file, "open '%s' -> %s fd %d%s%s", win.c_str(), host.c_str(), fd, write ? " (write)" : "",
            f->overlapped ? " (overlapped)" : "");
     // Windows sets ERROR_ALREADY_EXISTS when CREATE_ALWAYS/OPEN_ALWAYS hit an existing file.
@@ -220,15 +342,18 @@ BOOL do_io(HANDLE h, void* buf, DWORD n, DWORD* done, Overlapped* ov, bool is_wr
     auto f = get_file(h);
     if (!f) return set_last_error(ERROR_INVALID_HANDLE), FALSE_;
     if (done) *done = 0;
+    HostFd fd(*f);
+    if (fd.fd < 0) return set_last_error(errno_to_win(errno)), FALSE_;
     if (ov) {
         off_t off = (static_cast<off_t>(ov->OffsetHigh) << 32) | ov->Offset;
-        ssize_t r = is_write ? pwrite(f->fd, buf, n, off) : pread(f->fd, buf, n, off);
+        if (!is_write) os::write_watch_before_kernel_write(buf, n);
+        ssize_t r = is_write ? pwrite(fd.fd, buf, n, off) : pread(fd.fd, buf, n, off);
         if (r < 0) {
             set_last_error(errno_to_win(errno));
             return FALSE_;
         }
         DWORD status = (!is_write && r == 0 && n > 0) ? STATUS_END_OF_FILE : STATUS_SUCCESS;
-        FL_LOG(fileio, "%s fd %d off 0x%llx len 0x%x -> 0x%zx (overlapped)", is_write ? "write" : "read", f->fd,
+        FL_LOG(fileio, "%s fd %d off 0x%llx len 0x%x -> 0x%zx (overlapped)", is_write ? "write" : "read", fd.fd,
                (unsigned long long)off, n, r);
         if (status == STATUS_END_OF_FILE && !f->overlapped) return set_last_error(ERROR_HANDLE_EOF), FALSE_;
         complete(*f, ov, status, static_cast<DWORD>(r));
@@ -240,10 +365,12 @@ BOOL do_io(HANDLE h, void* buf, DWORD n, DWORD* done, Overlapped* ov, bool is_wr
         set_last_error(ERROR_IO_PENDING);
         return FALSE_;
     }
+    if (!is_write) os::write_watch_before_kernel_write(buf, n);
+    std::lock_guard lock(f->pos_mutex);
     size_t total = 0;
     while (total < n) {
-        ssize_t r = is_write ? write(f->fd, static_cast<uint8_t*>(buf) + total, n - total)
-                             : read(f->fd, static_cast<uint8_t*>(buf) + total, n - total);
+        ssize_t r = is_write ? pwrite(fd.fd, static_cast<uint8_t*>(buf) + total, n - total, f->pos)
+                             : pread(fd.fd, static_cast<uint8_t*>(buf) + total, n - total, f->pos);
         if (r < 0) {
             if (errno == EINTR) continue;
             set_last_error(errno_to_win(errno));
@@ -251,6 +378,7 @@ BOOL do_io(HANDLE h, void* buf, DWORD n, DWORD* done, Overlapped* ov, bool is_wr
         }
         if (r == 0) break;
         total += r;
+        f->pos += r;
     }
     if (done) *done = static_cast<DWORD>(total);
     return TRUE_;
@@ -275,8 +403,17 @@ WINAPI BOOL kx_GetOverlappedResultEx(HANDLE h, Overlapped* ov, DWORD* bytes, DWO
 WINAPI BOOL kx_SetFilePointerEx(HANDLE h, LARGE_INTEGER dist, LARGE_INTEGER* newpos, DWORD method) {
     auto f = get_file(h);
     if (!f) return set_last_error(ERROR_INVALID_HANDLE), FALSE_;
-    off_t r = lseek(f->fd, dist.QuadPart, method == 0 ? SEEK_SET : method == 1 ? SEEK_CUR : SEEK_END);
+    std::lock_guard lock(f->pos_mutex);
+    int64_t base = method == 0 ? 0 : f->pos;
+    if (method == 2) {
+        HostFd fd(*f);
+        struct stat st;
+        if (fd.fd < 0 || fstat(fd.fd, &st) != 0) return set_last_error(ERROR_INVALID_HANDLE), FALSE_;
+        base = st.st_size;
+    }
+    int64_t r = base + dist.QuadPart;
     if (r < 0) return set_last_error(ERROR_INVALID_PARAMETER), FALSE_;
+    f->pos = r;
     if (newpos) newpos->QuadPart = r;
     return TRUE_;
 }
@@ -292,8 +429,9 @@ WINAPI DWORD kx_SetFilePointer(HANDLE h, LONG lo, LONG* hi, DWORD method) {
 WINAPI BOOL kx_GetFileSizeEx(HANDLE h, LARGE_INTEGER* size) {
     auto f = get_file(h);
     if (!f) return set_last_error(ERROR_INVALID_HANDLE), FALSE_;
+    HostFd fd(*f);
     struct stat st;
-    fstat(f->fd, &st);
+    if (fd.fd < 0 || fstat(fd.fd, &st) != 0) return set_last_error(ERROR_INVALID_HANDLE), FALSE_;
     size->QuadPart = st.st_size;
     return TRUE_;
 }
@@ -301,17 +439,19 @@ WINAPI BOOL kx_GetFileSizeEx(HANDLE h, LARGE_INTEGER* size) {
 WINAPI BOOL kx_FlushFileBuffers(HANDLE h) {
     auto f = get_file(h);
     if (!f) return set_last_error(ERROR_INVALID_HANDLE), FALSE_;
+    HostFd fd(*f);
     double t0 = run_time();
-    fsync(f->fd);
-    FL_LOG(file, "FlushFileBuffers(fd %d): fsync %.1f ms", f->fd, (run_time() - t0) * 1000);
+    fsync(fd.fd);
+    FL_LOG(file, "FlushFileBuffers(fd %d): fsync %.1f ms", fd.fd, (run_time() - t0) * 1000);
     return TRUE_;
 }
 
 WINAPI BOOL kx_SetEndOfFile(HANDLE h) {
     auto f = get_file(h);
     if (!f) return set_last_error(ERROR_INVALID_HANDLE), FALSE_;
-    off_t pos = lseek(f->fd, 0, SEEK_CUR);
-    return ftruncate(f->fd, pos) == 0 ? TRUE_ : FALSE_;
+    HostFd fd(*f);
+    std::lock_guard lock(f->pos_mutex);
+    return fd.fd >= 0 && ftruncate(fd.fd, f->pos) == 0 ? TRUE_ : FALSE_;
 }
 
 struct FileBasicInfo {
@@ -327,8 +467,9 @@ struct FileStandardInfo {
 WINAPI BOOL kx_GetFileInformationByHandleEx(HANDLE h, int cls, void* out, DWORD size) {
     auto f = get_file(h);
     if (!f) return set_last_error(ERROR_INVALID_HANDLE), FALSE_;
+    HostFd fd(*f);
     struct stat st;
-    fstat(f->fd, &st);
+    if (fd.fd < 0 || fstat(fd.fd, &st) != 0) return set_last_error(ERROR_INVALID_HANDLE), FALSE_;
     auto ft = [](const timespec& ts) {
         LARGE_INTEGER v;
         v.QuadPart = static_cast<int64_t>(ts.tv_sec) * 10000000 + ts.tv_nsec / 100 + kEpochDelta;
@@ -482,7 +623,7 @@ WINAPI HANDLE kx_FindFirstFileExA(LPCSTR pattern, int level, Win32FindDataA* out
     ff->dir = vfs::to_host(dir_win);
     if (DIR* d = opendir(ff->dir.c_str())) {
         while (dirent* e = readdir(d))
-            if (fnmatch(glob.c_str(), e->d_name, FNM_CASEFOLD) == 0) ff->names.push_back(e->d_name);
+            if (wildcard_match(glob.c_str(), e->d_name)) ff->names.push_back(e->d_name);
         closedir(d);
     }
     FL_LOG(file, "FindFirstFile '%s' -> %s: %zu matches", pattern, ff->dir.c_str(), ff->names.size());

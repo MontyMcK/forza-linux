@@ -11,6 +11,7 @@
 
 #include "common/config.h"
 #include "common/log.h"
+#include "platform/os/files.h"
 
 namespace fl::vfs {
 namespace {
@@ -19,8 +20,7 @@ std::mutex g_cache_mutex;
 std::unordered_map<std::string, std::string> g_cache;  // lowercase host path -> real host path
 
 bool exists(const std::string& p) {
-    struct stat st;
-    return stat(p.c_str(), &st) == 0;
+    return os::path_exists(p.c_str());
 }
 
 // Find `name` inside directory `dir` ignoring case. Returns "" if absent.

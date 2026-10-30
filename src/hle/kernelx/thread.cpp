@@ -6,7 +6,6 @@
 #include <ctime>
 #include <mutex>
 #include <pthread.h>
-#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <unordered_map>
@@ -16,6 +15,8 @@
 #include "hle/kernelx/kobject.h"
 #include "hle/registry.h"
 #include "loader/thread_env.h"
+#include "platform/os/memory.h"
+#include "platform/os/thread.h"
 
 extern "C" void fl_fiber_switch(uint64_t* save_rsp, uint64_t new_rsp);
 extern "C" void fl_fiber_entry();
@@ -54,7 +55,10 @@ struct Thread : Waitable {
 
 std::mutex g_threads_mutex;
 std::unordered_map<DWORD, std::weak_ptr<Thread>> g_threads;
-thread_local std::shared_ptr<Thread> t_self;
+// The thread's own reference, through a plain pointer: no thread_local here
+// may have a destructor, since the PS5 build's thread_locals are emulated and
+// freed before such a destructor runs at thread exit (FINDINGS 7.10).
+thread_local std::shared_ptr<Thread>* t_self = nullptr;
 thread_local Thread* t_self_raw = nullptr;  // for the signal handler
 
 void register_thread(const std::shared_ptr<Thread>& t) {
@@ -64,14 +68,16 @@ void register_thread(const std::shared_ptr<Thread>& t) {
 
 std::shared_ptr<Thread> current_thread() {
     if (!t_self) {
-        // A thread we didn't create through CreateThread (the game's main thread).
-        t_self = std::make_shared<Thread>();
-        t_self->tid = current_tid();
-        clock_gettime(CLOCK_REALTIME, &t_self->created);
-        t_self_raw = t_self.get();
-        register_thread(t_self);
+        // A thread we didn't create through CreateThread (the game's main
+        // thread): its reference is never freed.
+        auto t = std::make_shared<Thread>();
+        t->tid = current_tid();
+        clock_gettime(CLOCK_REALTIME, &t->created);
+        t_self_raw = t.get();
+        register_thread(t);
+        t_self = new std::shared_ptr<Thread>(std::move(t));
     }
-    return t_self;
+    return *t_self;
 }
 
 std::shared_ptr<Thread> thread_from_handle(HANDLE h) {
@@ -100,20 +106,15 @@ void install_suspend_handler() {
 }
 
 void* thread_trampoline(void* arg) {
-    auto* holder = static_cast<std::shared_ptr<Thread>*>(arg);
-    t_self = std::move(*holder);
-    delete holder;
-    Thread* t = t_self.get();
+    t_self = static_cast<std::shared_ptr<Thread>*>(arg);  // CreateThread's holder, freed below
+    Thread* t = t_self->get();
     t_self_raw = t;
     t->tid = current_tid();
-    register_thread(t_self);
+    register_thread(*t_self);
 
-    pthread_attr_t attr;
     void* stack_lo;
     size_t stack_size;
-    pthread_getattr_np(pthread_self(), &attr);
-    pthread_attr_getstack(&attr, &stack_lo, &stack_size);
-    pthread_attr_destroy(&attr);
+    os::current_stack(&stack_lo, &stack_size);
     loader::attach_thread(stack_lo, static_cast<uint8_t*>(stack_lo) + stack_size);
 
     // Tell CreateThread our tid, then honor CREATE_SUSPENDED.
@@ -133,7 +134,8 @@ void* thread_trampoline(void* arg) {
     }
     loader::detach_thread();
     t_self_raw = nullptr;
-    t_self.reset();
+    delete t_self;
+    t_self = nullptr;
     return nullptr;
 }
 
@@ -205,7 +207,7 @@ WINAPI DWORD kx_SuspendThread(HANDLE h) {
             std::lock_guard lock(wait_lock());
             exited = t->exited;
         }
-        if (!exited && syscall(SYS_tgkill, getpid(), t->tid.load(), kSuspendSignal) == 0)
+        if (!exited && os::signal_thread(t->tid.load(), kSuspendSignal))
             while (!t->parked.load() && t->suspend_count.load() > 0) futex_wait(&t->parked, 0);
     }
     return static_cast<DWORD>(prev);
@@ -338,11 +340,10 @@ WINAPI BOOL kx_ConvertFiberToThread() {
 
 WINAPI void* kx_CreateFiber(SIZE_T stack, FiberStart start, void* param) {
     size_t size = (std::max<size_t>(stack ? stack : (1u << 20), 64u << 10) + 0xFFFF) & ~size_t(0xFFFF);
-    size_t guard = 4096;
-    auto* mem = static_cast<uint8_t*>(
-        mmap(nullptr, size + guard, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0));
-    if (mem == MAP_FAILED) return set_last_error(ERROR_NOT_ENOUGH_MEMORY), nullptr;
-    mprotect(mem, guard, PROT_NONE);
+    size_t guard = os::page_size();
+    auto* mem = static_cast<uint8_t*>(os::map_anon(nullptr, size + guard, os::kRead | os::kWrite));
+    if (!mem) return set_last_error(ERROR_NOT_ENOUGH_MEMORY), nullptr;
+    os::protect(mem, guard, os::kNone);
 
     auto* f = new Fiber{param};
     f->mem = mem;
@@ -384,7 +385,7 @@ WINAPI void kx_SwitchToFiber(void* target) {
 WINAPI void kx_DeleteFiber(void* fiber) {
     auto* f = static_cast<Fiber*>(fiber);
     if (f == current_fiber()) fl::fatal("DeleteFiber on the running fiber (would exit thread): not supported");
-    if (f->mem) munmap(f->mem, f->mem_size);
+    if (f->mem) os::release(f->mem, f->mem_size);
     delete f;
 }
 

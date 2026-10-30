@@ -24,6 +24,7 @@
 #include <atomic>
 #include <unistd.h>
 #include "loader/pe_image.h"
+#include "platform/os/thread.h"
 
 namespace fl::d3d {
 namespace {
@@ -36,7 +37,7 @@ using C = ContextX;
 __attribute__((noinline)) void note_context_user(ContextX* c) {
     static std::mutex m;
     static std::map<ContextX*, pid_t> last;
-    static thread_local pid_t tid = static_cast<pid_t>(syscall(SYS_gettid));
+    static thread_local pid_t tid = static_cast<pid_t>(os::thread_id());
     void* ra = __builtin_return_address(0);
     std::lock_guard lock(m);
     pid_t& prev = last[c];

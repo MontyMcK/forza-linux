@@ -14,8 +14,6 @@
 #include <mutex>
 #include <thread>
 #include <vector>
-#include <sys/syscall.h>
-#include <linux/futex.h>
 
 #include "common/log.h"
 #include "common/winabi.h"
@@ -24,6 +22,7 @@
 #include "hle/kernelx/kobject.h"
 #include "hle/registry.h"
 #include "hle/seh/seh.h"
+#include "hle/game_heap.h"
 
 namespace fl::crt {
 namespace {
@@ -83,8 +82,7 @@ WINAPI size_t ev_wait(Event* self, unsigned timeout) {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);
     while (!self->state.load()) {
         if (std::chrono::steady_clock::now() >= deadline) return SIZE_MAX;
-        timespec ts = {0, 1000000};  // poll in 1 ms steps; timeouts are rare
-        syscall(SYS_futex, reinterpret_cast<int32_t*>(&self->state), FUTEX_WAIT_PRIVATE, 0, &ts, nullptr, 0);
+        os::futex_wait(&self->state, 0, 1000000);  // poll in 1 ms steps; timeouts are rare
     }
     return 0;
 }
@@ -109,8 +107,8 @@ WINAPI void spin_dtor(SpinLock* self) { self->flag->store(0, std::memory_order_r
 
 // ---------------------------------------------------------------- allocation
 
-WINAPI void* cc_alloc(size_t n) { return malloc(n ? n : 1); }
-WINAPI void cc_free(void* p) { free(p); }
+WINAPI void* cc_alloc(size_t n) { return heap::alloc(n, false); }
+WINAPI void cc_free(void* p) { heap::free(p); }
 
 // ---------------------------------------------------------------- scheduler
 

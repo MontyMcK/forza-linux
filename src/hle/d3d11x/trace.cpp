@@ -618,9 +618,9 @@ void log_targets(void* ctx, const char* indent) {
 }
 
 const char* describe_dxvk(void* obj) {
-    static thread_local std::string s;
-    s = resource_str(obj);
-    return s.c_str();
+    static thread_local char s[512];  // no std::string: see kernelx/thread.cpp t_self
+    snprintf(s, sizeof s, "%s", resource_str(obj).c_str());
+    return s;
 }
 
 // FL_TRACE_CB=1: also log each bound constant buffer of the PS (or CS) and its

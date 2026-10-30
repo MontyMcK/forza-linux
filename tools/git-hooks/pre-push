@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Every push also refreshes the project's NAS handoff folder (tools/nas_sync.sh)
+# in the background, so the push doesn't wait. It never blocks a push.
+"$(git rev-parse --show-toplevel)/tools/nas_sync.sh" --background || true
+exit 0

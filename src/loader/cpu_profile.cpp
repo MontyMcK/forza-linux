@@ -17,6 +17,9 @@
 
 #include "common/log.h"
 #include "loader/pe_image.h"
+#include "platform/os/thread.h"
+#include "platform/os/signal_context.h"
+#include "platform/os/debug.h"
 
 namespace fl::loader {
 namespace {
@@ -36,22 +39,14 @@ void on_prof(int, siginfo_t*, void* uc) {
     size_t i = g_count.fetch_add(1, std::memory_order_relaxed);
     if (i >= kMax) return;
     int saved = errno;
-    const greg_t* g = static_cast<ucontext_t*>(uc)->uc_mcontext.gregs;
-    g_samples[i].rip = g[REG_RIP];
-    g_samples[i].ret = *reinterpret_cast<const uint64_t*>(g[REG_RSP]);
-    g_samples[i].tid = static_cast<uint32_t>(syscall(SYS_gettid));
+    os::Regs g(uc);
+    g_samples[i].rip = g[os::kRip];
+    g_samples[i].ret = *reinterpret_cast<const uint64_t*>(g[os::kRsp]);
+    g_samples[i].tid = static_cast<uint32_t>(os::thread_id());
     errno = saved;
 }
 
-std::string thread_name(uint32_t tid) {
-    char path[64], name[64] = "?";
-    snprintf(path, sizeof path, "/proc/self/task/%u/comm", tid);
-    if (FILE* f = fopen(path, "r")) {
-        if (fgets(name, sizeof name, f)) name[strcspn(name, "\n")] = 0;
-        fclose(f);
-    }
-    return name;
-}
+std::string thread_name(uint32_t tid) { return os::thread_name(tid); }
 
 // The game function containing `rva` (from .pdata), or 0.
 uint32_t game_function(const PeImage& img, uint32_t rva) {

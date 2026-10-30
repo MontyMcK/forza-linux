@@ -3,13 +3,13 @@
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
 #include "common/log.h"
 #include "loader/pe_structs.h"
+#include "platform/os/memory.h"
 
 namespace fl::loader {
 namespace {
@@ -56,12 +56,12 @@ void apply_relocations(PeImage& img, const ImageNtHeaders64* nt) {
     FL_LOG(loader, "applied %zu relocations (delta %+lld)", count, static_cast<long long>(delta));
 }
 
-int section_prot(uint32_t chr) {
-    int prot = 0;
-    if (chr & kScnMemRead) prot |= PROT_READ;
-    if (chr & kScnMemWrite) prot |= PROT_WRITE;
-    if (chr & kScnMemExecute) prot |= PROT_EXEC | PROT_READ;
-    return prot ? prot : PROT_READ;
+unsigned section_prot(uint32_t chr) {
+    unsigned prot = 0;
+    if (chr & kScnMemRead) prot |= os::kRead;
+    if (chr & kScnMemWrite) prot |= os::kWrite;
+    if (chr & kScnMemExecute) prot |= os::kExec | os::kRead;
+    return prot ? prot : os::kRead;
 }
 
 }  // namespace
@@ -91,11 +91,11 @@ PeImage map_image(const std::string& path) {
 
     // Try the preferred base first; the game was linked for it.
     void* want = reinterpret_cast<void*>(oh.ImageBase);
-    void* mem = mmap(want, img.size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
-    if (mem == MAP_FAILED) {
+    void* mem = os::map_anon(want, img.size, os::kRead | os::kWrite);
+    if (!mem) {
         FL_ERROR("preferred base %p unavailable (%s), relocating", want, strerror(errno));
-        mem = mmap(nullptr, img.size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (mem == MAP_FAILED) fatal("mmap of image failed: %s", strerror(errno));
+        mem = os::map_anon(nullptr, img.size, os::kRead | os::kWrite);
+        if (!mem) fatal("mmap of image failed: %s", strerror(errno));
     }
     img.base = static_cast<uint8_t*>(mem);
 
@@ -122,12 +122,26 @@ void protect_image(PeImage& img) {
     auto* nt = img.at<ImageNtHeaders64>(dos->e_lfanew);
     auto* sec = reinterpret_cast<ImageSectionHeader*>(reinterpret_cast<uint8_t*>(&nt->OptionalHeader) +
                                                       nt->FileHeader.SizeOfOptionalHeader);
-    mprotect(img.base, 0x1000, PROT_READ);
+    // PE sections are 4 KiB aligned; a host page shared by several (16 KiB on
+    // the PS5) gets the union of their protections. Pages no section covers
+    // keep the mapping's read-write.
+    const size_t page = os::page_size();
+    std::vector<int> prot((img.size + page - 1) / page, -1);
+    auto add = [&](uint64_t lo, uint64_t hi, unsigned p) {
+        for (uint64_t pg = lo / page; pg * page < hi && pg < prot.size(); pg++) prot[pg] = (prot[pg] < 0 ? 0 : prot[pg]) | p;
+    };
+    add(0, 0x1000, os::kRead);  // headers
     for (int i = 0; i < nt->FileHeader.NumberOfSections; i++) {
         uint32_t start = sec[i].VirtualAddress & ~0xFFFu;
         uint32_t end = (sec[i].VirtualAddress + std::max(sec[i].VirtualSize, sec[i].SizeOfRawData) + 0xFFF) & ~0xFFFu;
-        if (mprotect(img.base + start, end - start, section_prot(sec[i].Characteristics)) != 0)
-            fatal("mprotect section %d failed: %s", i, strerror(errno));
+        add(start, end, section_prot(sec[i].Characteristics));
+    }
+    for (size_t i = 0; i < prot.size();) {
+        size_t j = i + 1;
+        while (j < prot.size() && prot[j] == prot[i]) j++;
+        if (prot[i] >= 0 && !os::protect(img.base + i * page, (j - i) * page, prot[i]))
+            fatal("mprotect of image pages 0x%zx-0x%zx failed: %s", i * page, j * page, strerror(errno));
+        i = j;
     }
 }
 

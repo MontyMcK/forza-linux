@@ -11,6 +11,8 @@ bool log_enabled(const char* channel);
 // Seconds since log_init (the timestamps in log lines).
 double run_time();
 void log_write(const char* channel, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
+// Writes buffered lines to FL_LOG_FILE now (exit paths; ERROR/FATAL lines flush by themselves).
+void log_flush();
 [[noreturn]] void fatal(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 
 }  // namespace fl

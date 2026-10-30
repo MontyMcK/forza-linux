@@ -5,7 +5,7 @@
 
 #include "common/log.h"
 #include "hle/winrt/activation.h"
-#include "platform/window.h"
+#include "platform/os/window.h"
 
 namespace fl::winrt {
 namespace {
@@ -45,7 +45,7 @@ WINAPI HRESULT cw_get_Dispatcher(Iface* self, void** out) {
 
 WINAPI HRESULT cw_Activate(Iface* self) {
     fl::log_write("winrt", "CoreWindow::Activate");
-    platform::window();  // the real window appears now, on the UI thread
+    os::window();  // the real window appears now, on the UI thread
     self_of(self)->activated = true;
     self_of(self)->visible = true;
     return S_OK;
@@ -202,7 +202,7 @@ WINAPI HRESULT cd_ProcessEvents(Iface* self, int option) {
         logged = true;
         fl::log_write("winrt", "CoreDispatcher::ProcessEvents(%d): the game loop is pumping events", option);
     }
-    platform::pump_events();
+    os::pump_events();
     CoreWindow& w = CoreWindow::instance();
     if (w.activated && !w.visibility_raised && !w.events[kVisibilityChanged].empty()) {
         w.visibility_raised = true;
@@ -248,7 +248,7 @@ CoreWindow::CoreWindow()
     expose(IID_ICoreWindow, &iwindow);
     expose(IID_ICoreDispatcher, &idispatcher);
     // Start SDL video here, on the UI thread, before the render thread starts DXVK.
-    platform::video_init();
+    os::video_init();
 }
 
 CoreWindow& CoreWindow::instance() {
