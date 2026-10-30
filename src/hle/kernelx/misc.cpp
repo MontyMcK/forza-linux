@@ -223,7 +223,7 @@ HMODULE load_module(const std::string& raw) {
     m->name = name;
     // TODO: PE DLLs from the game package (Microsoft.Xbox.Services.dll...) should be
     // mapped by the loader. For now only HLE modules are "loadable".
-    static const char* const kHle[] = {"xaudio2_9.dll", "xaudio2_9"};
+    static const char* const kHle[] = {"xaudio2_9.dll", "xaudio2_9", "WindowsCodecs.dll"};
     bool known = false;
     for (const char* k : kHle) known = known || strcasecmp(k, name.c_str()) == 0;
     fl::log_write("kernelx", "LoadLibrary(%s) -> %s", raw.c_str(), known ? "HLE module" : "NOT FOUND");
