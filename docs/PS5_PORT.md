@@ -127,7 +127,7 @@ The PS5 binary statically links PS5_Vulkan's RADV build and link recipe, and the
 - [ ] window/present
 - [ ] input
 - [ ] controller output (rumble, trigger effects)
-- [ ] audio out
+- [x] audio out (`os/audio.h`, SDL3 stream on Linux; WASAPI's IAudioClient uses it). The OS layer is now the `fl_os` static library
 - [ ] GPU write tracking
 
 ### Step 5: toolchain and packaging

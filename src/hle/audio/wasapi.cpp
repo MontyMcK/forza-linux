@@ -15,12 +15,11 @@
 #include <thread>
 #include <vector>
 
-#include <SDL3/SDL.h>
-
 #include "common/log.h"
 #include "hle/kernelx/sync_objects.h"
 #include "hle/registry.h"
 #include "hle/winrt/object.h"
+#include "platform/os/audio.h"
 
 namespace fl::audio {
 namespace {
@@ -99,21 +98,21 @@ struct AudioClient : Object {
     std::vector<uint8_t> staging;
     std::atomic<bool> quit{false};
     std::thread device;
-    SDL_AudioStream* stream = nullptr;  // null: drop frames (null backend)
-    uint64_t pushed = 0;                // frames handed to SDL
+    os::AudioOut* stream = nullptr;  // null: drop frames (null backend)
+    uint64_t pushed = 0;             // frames handed to the audio output
     int device_frames = 0;              // frames the device pulls at a time
     uint32_t checks = 0, low = 0;       // FL_LOG=audio statistics
 
     ~AudioClient() override {
         quit = true;
         if (device.joinable()) device.join();
-        if (stream) SDL_DestroyAudioStream(stream);
+        os::audio_close(stream);
     }
 
-    // Frames SDL has not played yet (the WASAPI "padding"). Caller holds m.
+    // Frames the output has not played yet (the WASAPI "padding"). Caller holds m.
     void update_padding() {
         if (!stream) return;
-        uint32_t queued = static_cast<uint32_t>(std::max(0, SDL_GetAudioStreamQueued(stream)) / block);
+        uint32_t queued = static_cast<uint32_t>(os::audio_queued_bytes(stream) / block);
         padding = std::min(queued, buffer_frames);
         played = pushed - padding;
     }
@@ -121,29 +120,12 @@ struct AudioClient : Object {
     void open_backend(const WaveFormatEx* fmt) {
         const char* env = getenv("FL_AUDIO");
         if (env && !strcmp(env, "null")) return;
-        SDL_AudioFormat sf = SDL_AUDIO_F32;
+        os::SampleFormat sf = os::SampleFormat::F32;
         bool is_float = fmt->wFormatTag == 3;
         if (fmt->wFormatTag == 0xFFFE)
             is_float = reinterpret_cast<const WaveFormatExtensible*>(fmt)->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
-        if (!is_float) sf = fmt->wBitsPerSample == 16 ? SDL_AUDIO_S16 : SDL_AUDIO_S32;
-        if (!SDL_WasInit(SDL_INIT_AUDIO) && !SDL_InitSubSystem(SDL_INIT_AUDIO)) {
-            FL_ERROR("audio: SDL_InitSubSystem(AUDIO) failed: %s (sound disabled)", SDL_GetError());
-            return;
-        }
-        SDL_AudioSpec spec{sf, fmt->nChannels, static_cast<int>(fmt->nSamplesPerSec)};
-        // Ask for ~10 ms device periods (PipeWire's default quantum here is
-        // 1024 frames, 21 ms); FL_AUDIO_FRAMES overrides.
-        const char* frames_env = getenv("FL_AUDIO_FRAMES");
-        SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, frames_env ? frames_env : "480");
-        stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
-        if (!stream) {
-            FL_ERROR("audio: SDL_OpenAudioDeviceStream failed: %s (sound disabled)", SDL_GetError());
-            return;
-        }
-        SDL_AudioSpec dev{};
-        if (!SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(stream), &dev, &device_frames)) device_frames = 0;
-        fl::log_write("audio", "SDL audio stream open (%s), device period %d frames", SDL_GetCurrentAudioDriver(),
-                      device_frames);
+        if (!is_float) sf = fmt->wBitsPerSample == 16 ? os::SampleFormat::S16 : os::SampleFormat::S32;
+        stream = os::audio_open(sf, fmt->nChannels, static_cast<int>(fmt->nSamplesPerSec), &device_frames);
     }
 
     void device_loop() {
@@ -253,19 +235,19 @@ struct AudioClient : Object {
     static WINAPI HRESULT Start(Iface* i) {
         std::lock_guard lock(self(i)->m);
         self(i)->running = true;
-        if (self(i)->stream) SDL_ResumeAudioStreamDevice(self(i)->stream);
+        if (self(i)->stream) os::audio_resume(self(i)->stream);
         fl::log_write("audio", "IAudioClient::Start%s", self(i)->stream ? "" : " (null backend: audio is discarded)");
         return S_OK;
     }
     static WINAPI HRESULT Stop(Iface* i) {
         std::lock_guard lock(self(i)->m);
         self(i)->running = false;
-        if (self(i)->stream) SDL_PauseAudioStreamDevice(self(i)->stream);
+        if (self(i)->stream) os::audio_pause(self(i)->stream);
         return S_OK;
     }
     static WINAPI HRESULT Reset(Iface* i) {
         std::lock_guard lock(self(i)->m);
-        if (self(i)->stream) SDL_ClearAudioStream(self(i)->stream);
+        if (self(i)->stream) os::audio_clear(self(i)->stream);
         self(i)->padding = 0;
         return S_OK;
     }
@@ -298,7 +280,7 @@ struct AudioClient : Object {
         if (c->stream) {
             size_t bytes = static_cast<size_t>(frames) * c->block;
             if (flags & 2 /* AUDCLNT_BUFFERFLAGS_SILENT */) memset(c->staging.data(), 0, bytes);
-            SDL_PutAudioStreamData(c->stream, c->staging.data(), static_cast<int>(bytes));
+            os::audio_write(c->stream, c->staging.data(), bytes);
             c->pushed += frames;
             c->update_padding();
         } else {

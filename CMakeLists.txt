@@ -34,7 +34,6 @@ file(GLOB_RECURSE FL_SOURCES CONFIGURE_DEPENDS
 set(FL_OS linux CACHE STRING "OS backend: src/platform/os/<FL_OS>/")
 list(FILTER FL_SOURCES EXCLUDE REGEX "/src/platform/os/[^/]+/")
 file(GLOB FL_OS_SOURCES CONFIGURE_DEPENDS src/platform/os/${FL_OS}/*.cpp)
-list(APPEND FL_SOURCES ${FL_OS_SOURCES})
 
 # AMD addrlib (MIT, from Mesa; third_party/addrlib/MESA_COMMIT): GCN surface layouts.
 file(GLOB_RECURSE FL_ADDRLIB_SOURCES third_party/addrlib/src/*.cpp)
@@ -67,7 +66,11 @@ set(FL_DXVK_LIBS ${FL_DXVK_ROOT}/lib64/libdxvk_d3d11.so ${FL_DXVK_ROOT}/lib64/li
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL3 REQUIRED IMPORTED_TARGET sdl3)
 pkg_check_modules(ZLIB REQUIRED IMPORTED_TARGET zlib)
-target_link_libraries(forza-linux PRIVATE pthread dl ${FL_DXVK_LIBS} PkgConfig::SDL3 PkgConfig::ZLIB addrlib)
+# The OS layer (src/platform/os/README.md) as a library: tests link only the parts they use.
+add_library(fl_os STATIC ${FL_OS_SOURCES})
+target_include_directories(fl_os PUBLIC src)
+target_link_libraries(fl_os PUBLIC pthread PkgConfig::SDL3)
+target_link_libraries(forza-linux PRIVATE pthread dl ${FL_DXVK_LIBS} PkgConfig::SDL3 PkgConfig::ZLIB addrlib fl_os)
 # HLE exports register themselves through static constructors; keep them all.
 target_link_options(forza-linux PRIVATE -Wl,--export-dynamic)
 
@@ -89,27 +92,23 @@ add_executable(dxvk_smoke tests/dxvk_smoke.cpp)
 target_include_directories(dxvk_smoke SYSTEM PRIVATE ${FL_DXVK_ROOT}/include/dxvk)
 target_link_libraries(dxvk_smoke PRIVATE ${FL_DXVK_LIBS})
 
-add_executable(gcn_layout_test tests/gcn_layout_test.cpp src/hle/xg/gcn.cpp src/common/log.cpp src/common/workers.cpp
-               ${FL_OS_SOURCES})
+add_executable(gcn_layout_test tests/gcn_layout_test.cpp src/hle/xg/gcn.cpp src/common/log.cpp src/common/workers.cpp)
 target_include_directories(gcn_layout_test PRIVATE src)
-target_link_libraries(gcn_layout_test PRIVATE addrlib pthread)
+target_link_libraries(gcn_layout_test PRIVATE addrlib pthread fl_os)
 
-add_executable(os_test tests/os_test.cpp ${FL_OS_SOURCES})
-target_include_directories(os_test PRIVATE src)
-target_link_libraries(os_test PRIVATE pthread)
+add_executable(os_test tests/os_test.cpp)
+target_link_libraries(os_test PRIVATE fl_os)
 
-add_executable(concrt_token_test tests/concrt_token_test.cpp src/hle/crt/concrt.cpp src/hle/registry.cpp src/common/log.cpp
-               ${FL_OS_SOURCES})
+add_executable(concrt_token_test tests/concrt_token_test.cpp src/hle/crt/concrt.cpp src/hle/registry.cpp src/common/log.cpp)
 target_include_directories(concrt_token_test PRIVATE src)
-target_link_libraries(concrt_token_test PRIVATE pthread)
+target_link_libraries(concrt_token_test PRIVATE pthread fl_os)
 
 add_executable(wic_png_test tests/wic_png_test.cpp src/hle/wic/wic.cpp src/hle/winrt/object.cpp src/hle/registry.cpp
-               src/common/log.cpp src/common/png.cpp src/common/wstr.cpp ${FL_OS_SOURCES})
+               src/common/log.cpp src/common/png.cpp src/common/wstr.cpp)
 target_include_directories(wic_png_test PRIVATE src)
-target_link_libraries(wic_png_test PRIVATE pthread PkgConfig::ZLIB)
+target_link_libraries(wic_png_test PRIVATE pthread PkgConfig::ZLIB fl_os)
 
 # Dev tool (reads game files): untile a .swatchbin mip to PNG.
-add_executable(swatch_view tools/swatch_view.cpp src/hle/xg/gcn.cpp src/common/log.cpp src/common/png.cpp src/common/workers.cpp
-               ${FL_OS_SOURCES})
+add_executable(swatch_view tools/swatch_view.cpp src/hle/xg/gcn.cpp src/common/log.cpp src/common/png.cpp src/common/workers.cpp)
 target_include_directories(swatch_view PRIVATE src)
-target_link_libraries(swatch_view PRIVATE addrlib pthread PkgConfig::ZLIB)
+target_link_libraries(swatch_view PRIVATE addrlib pthread PkgConfig::ZLIB fl_os)

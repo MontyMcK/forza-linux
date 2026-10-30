@@ -1,7 +1,7 @@
 # src/platform/os: what the runtime needs from the host OS
 
 One header per area here; one implementation per OS in `src/platform/os/<os>/`.
-CMake builds the backend named by `FL_OS` (default `linux`); the PS5 backend
+CMake builds the backend named by `FL_OS` (default `linux`) as the `fl_os` library; the PS5 backend
 (`ps5/`) comes with docs/PS5_PORT.md Step 6. Code outside this folder must not
 call the OS directly for anything listed below.
 
@@ -16,6 +16,6 @@ call the OS directly for anything listed below.
 | Window / present | | SDL3 | VK_KHR_display on VideoOut | no |
 | Input | | SDL3 gamepad | ScePad | no |
 | Controller output (rumble, triggers) | | SDL3 | ScePad | no |
-| Audio out | | SDL3 audio stream | SceAudioOut | no |
+| Audio out | audio.h | SDL3 audio stream | SceAudioOut | yes |
 | GPU write tracking (incl. gpumem's `mapped`/`readable` page probes) | | userfaultfd + PAGEMAP_SCAN, `msync`, `process_vm_readv` | mprotect + SIGSEGV | no |
 | Crash/debug reports: thread list, signal stacks | | `/proc/self/task`, `sigaltstack` | (to find) | no |
