@@ -336,4 +336,6 @@ Next: check the cost of the full 4-sample resolve (FL_LOG=fps) and other users o
 - Probe (tools/ps5/probe/oh2probe.c) as a payload: 24 pass, 2 fail. Results in FINDINGS §7: exec via sceKernelMprotect, GS base via sysarch, umtx, 16 KiB pages, reservations at 0x140000000 and 0x1000000000, mcontext at +64 and FXSAVE at +320, SIGSEGV write faults at ~41 us. Fails: MAP_FIXED|MAP_EXCL overwrites (as reported), 1 GiB direct memory refused in a payload (no budget). The console reports firmware 13.590.001 (Monty: 13.20).
 - Linux check: gcn_layout_test and dxvk_smoke pass, FL_EXIT_AFTER_FRAME=300 exits cleanly.
 
-Next: PS5_PORT.md Step 4 (src/platform/os/ with a Linux backend, behaviour unchanged), and Step 3b (the probe as a title, which needs Step 5's packaging) to settle direct memory and whether a title can read /mnt/usbN.
+- Step 4 started: src/platform/os/ (README status table, FL_OS backend selection in CMake), futex and file existence moved, tests/os_test.cpp passes; Linux check passes.
+
+Next: Step 4's memory area (reserve/commit/protect/exec/page size: src/hle/kernelx/memory.cpp, src/loader/pe_image.cpp, the d3d11x gpumem/placement mappings) behind src/platform/os/memory.h, then the rest of the Step 4 list. In parallel, Step 3b (the probe as a title; needs Step 5's packaging) settles direct memory and whether a title can read /mnt/usbN. The USB copy of Monty's dump was still running at the end of this entry: verify every file's size against game_data/ before telling him to unplug it.
