@@ -1,10 +1,10 @@
-// Gamepad input: the first SDL gamepad, or the keyboard when none is plugged in.
-// Buttons use the Xbox GamepadButtons bit values (input.cpp).
+// Gamepad input (Linux: the first SDL gamepad, or the keyboard when none is
+// plugged in). Buttons use the Xbox GamepadButtons bit values.
 #pragma once
 
 #include <cstdint>
 
-namespace fl::platform {
+namespace fl::os {
 
 struct PadState {
     uint64_t timestamp;  // 100 ns ticks
@@ -16,4 +16,4 @@ struct PadState {
 PadState read_pad();
 void set_vibration(float left, float right, float left_trigger, float right_trigger);
 
-}  // namespace fl::platform
+}  // namespace fl::os

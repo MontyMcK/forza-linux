@@ -1,4 +1,4 @@
-#include "platform/input.h"
+#include "platform/os/input.h"
 
 #include <SDL3/SDL.h>
 #include <cstdlib>
@@ -9,7 +9,7 @@
 
 #include "common/log.h"
 
-namespace fl::platform {
+namespace fl::os {
 namespace {
 
 // Windows.Xbox.Input.GamepadButtons (same values as the public
@@ -175,4 +175,4 @@ void set_vibration(float left, float right, float lt, float rt) {
     }
 }
 
-}  // namespace fl::platform
+}  // namespace fl::os

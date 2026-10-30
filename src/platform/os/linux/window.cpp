@@ -1,4 +1,4 @@
-#include "platform/window.h"
+#include "platform/os/window.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -12,7 +12,7 @@
 
 #include "common/log.h"
 
-namespace fl::platform {
+namespace fl::os {
 namespace {
 
 std::once_flag g_init_once;
@@ -112,7 +112,7 @@ void video_init() {
     window();
 }
 
-SDL_Window* window() {
+void* window() {
     std::lock_guard lock(g_window_mutex);
     if (g_window) return g_window;
     int w, h;
@@ -173,4 +173,4 @@ void pump_events() {
     }
 }
 
-}  // namespace fl::platform
+}  // namespace fl::os

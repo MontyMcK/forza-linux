@@ -26,7 +26,7 @@
 #include "hle/d3d11x/d3d11x.h"
 #include "hle/d3d11x/dxvk.h"
 #include "hle/registry.h"
-#include "platform/window.h"
+#include "platform/os/window.h"
 
 namespace fl::d3d {
 namespace {
@@ -285,7 +285,7 @@ void pace_present(UINT sync) {
         // Without a cap, the display's refresh rate: unpaced, the loading
         // screen presented ~15000 frames a second and starved the loaders.
         static int64_t refresh_period = [] {
-            float hz = platform::refresh_rate();
+            float hz = os::refresh_rate();
             return static_cast<int64_t>(1e9 / (hz > 20 ? hz : 60));
         }();
         period = c.fps_cap > 0 ? 1'000'000'000LL / c.fps_cap : refresh_period;
@@ -487,7 +487,7 @@ WINAPI HRESULT factory_CreateSwapChainForCoreWindow(Iface* self, void* device, v
     if (d.flags) log_once("swap chain: Xbox flags (ignored)", d.flags);
     d.flags = 0;
     d.scaling = 0;  // DXGI_SCALING_STRETCH: the window size is ours, not the game's
-    SDL_Window* win = platform::window();
+    void* win = os::window();
     void* sc = nullptr;
     HRESULT hr = dx<HRESULT>(self->as<DxgiObject>()->dxvk, desktop::factory::CreateSwapChainForHwnd, dev->dxvk,
                              static_cast<void*>(win), &d, nullptr, nullptr, &sc);

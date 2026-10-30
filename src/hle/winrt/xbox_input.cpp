@@ -9,7 +9,7 @@
 #include "hle/winrt/collections.h"
 #include "hle/winrt/object.h"
 #include "hle/winrt/xbox.h"
-#include "platform/input.h"
+#include "platform/os/input.h"
 
 namespace fl::winrt {
 namespace {
@@ -45,7 +45,7 @@ struct RawReading {
 static_assert(sizeof(RawReading) == 40);
 
 RawReading raw_now() {
-    platform::PadState p = platform::read_pad();
+    os::PadState p = os::read_pad();
     return {p.timestamp, p.buttons, p.left_trigger, p.right_trigger, p.lx, p.ly, p.rx, p.ry, 0};
 }
 
@@ -112,7 +112,7 @@ struct Controller : Object {
         float left, right, left_trigger, right_trigger;
     };
     static WINAPI HRESULT SetVibration(Iface*, Vibration v) {
-        platform::set_vibration(v.left, v.right, v.left_trigger, v.right_trigger);
+        os::set_vibration(v.left, v.right, v.left_trigger, v.right_trigger);
         return S_OK;
     }
     static WINAPI HRESULT GetCurrentReading(Iface*, void** out) {

@@ -13,9 +13,9 @@ call the OS directly for anything listed below.
 | Thread environment: GS (TEB), game-thread CPU state, thread ids, signal a thread | thread.h | `arch_prctl(ARCH_SET_GS)`, `gettid`, `tgkill` | `sysarch(AMD64_SET_GSBASE)`, MXCSR 0x1f80, `thr_self`, `thr_kill` | yes |
 | Checked copies (never fault) | memory.h | `process_vm_readv/writev` on ourselves | a fault-guarded copy (no process_vm_*) | yes |
 | Signal context access | signal_context.h | `ucontext_t` gregs / fpregs | mcontext at +64 (rip +224), FXSAVE at +320 | yes |
-| Window / present | | SDL3 | VK_KHR_display on VideoOut | no |
-| Input | | SDL3 gamepad | ScePad | no |
-| Controller output (rumble, triggers) | | SDL3 | ScePad | no |
+| Window / present | window.h | SDL3 window (DXVK's swap chain is made for it) | VK_KHR_display on VideoOut | yes |
+| Input | input.h | SDL3 gamepad / keyboard | ScePad | yes |
+| Controller output (rumble, triggers) | input.h (`set_vibration`) | SDL3 | ScePad | yes |
 | Audio out | audio.h | SDL3 audio stream | SceAudioOut | yes |
 | GPU write tracking (incl. gpumem's `mapped`/`readable` page probes) | | userfaultfd + PAGEMAP_SCAN, `msync`, `process_vm_readv` | mprotect + SIGSEGV | no |
 | Crash/debug reports: thread list, signal stacks | | `/proc/self/task`, `sigaltstack` | (to find) | no |
