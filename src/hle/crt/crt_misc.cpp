@@ -8,7 +8,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
-#include <malloc.h>
 
 #include "common/log.h"
 #include "common/winabi.h"

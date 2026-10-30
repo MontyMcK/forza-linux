@@ -19,6 +19,7 @@
 #include "loader/pe_image.h"
 #include "platform/os/thread.h"
 #include "platform/os/signal_context.h"
+#include "platform/os/debug.h"
 
 namespace fl::loader {
 namespace {
@@ -45,15 +46,7 @@ void on_prof(int, siginfo_t*, void* uc) {
     errno = saved;
 }
 
-std::string thread_name(uint32_t tid) {
-    char path[64], name[64] = "?";
-    snprintf(path, sizeof path, "/proc/self/task/%u/comm", tid);
-    if (FILE* f = fopen(path, "r")) {
-        if (fgets(name, sizeof name, f)) name[strcspn(name, "\n")] = 0;
-        fclose(f);
-    }
-    return name;
-}
+std::string thread_name(uint32_t tid) { return os::thread_name(tid); }
 
 // The game function containing `rva` (from .pdata), or 0.
 uint32_t game_function(const PeImage& img, uint32_t rva) {

@@ -18,4 +18,9 @@ call the OS directly for anything listed below.
 | Controller output (rumble, triggers) | input.h (`set_vibration`) | SDL3 | ScePad | yes |
 | Audio out | audio.h | SDL3 audio stream | SceAudioOut | yes |
 | GPU write tracking (GetWriteWatch-like) and page probes | write_watch.h | userfaultfd async WP + PAGEMAP_SCAN, `msync`, `process_vm_readv` | mprotect + SIGSEGV (~41 us/fault, FINDINGS 7.3) | yes |
-| Crash/debug reports: thread list, signal stacks | | `/proc/self/task`, `sigaltstack` | (to find) | no |
+| Diagnostics: thread list, names, CPU times, the mapping of an address | debug.h | `/proc/self/task`, `/proc/self/maps` | (to find; may return empty) | yes |
+
+Plain POSIX (files, pthreads, clocks, `sigaction`, `sigaltstack`, real-time
+signals) stays in the callers: the PS5's FreeBSD libc has it. Watch for the
+PS5's limits there: ~249 files open by path, 64 KiB default thread stacks
+(FINDINGS 7).

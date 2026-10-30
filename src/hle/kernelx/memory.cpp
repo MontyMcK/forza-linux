@@ -5,7 +5,6 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
-#include <malloc.h>
 #include <map>
 #include <mutex>
 

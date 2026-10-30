@@ -129,6 +129,8 @@ The PS5 binary statically links PS5_Vulkan's RADV build and link recipe, and the
 - [x] controller output (`os/input.h` `set_vibration`; DualSense trigger effects come with M8)
 - [x] audio out (`os/audio.h`, SDL3 stream on Linux; WASAPI's IAudioClient uses it). The OS layer is now the `fl_os` static library
 - [x] GPU write tracking (`os/write_watch.h`: register / report-and-reset / written / page probes; gpumem.cpp keeps the policy)
+- [x] diagnostics (`os/debug.h`: thread list/names/CPU time, mapping of an address; crash/freeze dumps and the CPU profiler)
+- Step 4 complete (2026-10-30): no SDL, `/proc`, `<linux/…>`, raw `syscall()` or `ucontext` layout outside `src/platform/os/linux/`; `tests/os_test.cpp` (24 checks) is the contract a PS5 backend must pass
 
 ### Step 5: toolchain and packaging
 - [ ] `cmake/ps5.cmake` toolchain

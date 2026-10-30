@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 
+#include "platform/os/debug.h"
 #include "platform/os/files.h"
 #include "platform/os/futex.h"
 #include "platform/os/memory.h"
@@ -128,6 +129,14 @@ int main() {
     t2.join();
     check(other_tid != os::thread_id() && os::process_id() != 0, "thread ids differ between threads");
     check(sent && got_signal, "signal_thread delivers to that thread");
+
+    // Diagnostics.
+    bool self_listed = false;
+    for (const os::ThreadInfo& ti : os::list_threads()) self_listed |= ti.tid == os::thread_id() && !ti.name.empty();
+    check(self_listed, "list_threads includes this thread with a name");
+    int on_stack = 0;
+    check(!os::mapping_of(reinterpret_cast<uint64_t>(&on_stack)).empty() && os::mapping_of(8).empty(),
+          "mapping_of: the stack is mapped, address 8 is not");
 
     // Signal context: read rax and xmm0 of the interrupted code, change rax.
     static uint64_t seen_rax, seen_xmm0;

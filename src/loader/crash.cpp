@@ -27,6 +27,7 @@
 #include "platform/os/memory.h"
 #include "platform/os/thread.h"
 #include "platform/os/signal_context.h"
+#include "platform/os/debug.h"
 
 namespace fl::loader {
 namespace {
@@ -149,21 +150,11 @@ void handler(int sig, siginfo_t* si, void* uc_) {
     describe(fa, sizeof fa, fault);
     if (sig == SIGSEGV) {
         // The mapping the fault address is in (not async-signal-safe; we are dying).
-        if (FILE* f = fopen("/proc/self/maps", "r")) {
-            char line[256];
-            bool found = false;
-            while (fgets(line, sizeof line, f)) {
-                unsigned long long lo, hi;
-                if (sscanf(line, "%llx-%llx", &lo, &hi) == 2 && fault >= lo && fault < hi) {
-                    line[strcspn(line, "\n")] = 0;
-                    fl::log_write("FATAL", "fault address mapping: %s", line);
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) fl::log_write("FATAL", "fault address is not mapped");
-            fclose(f);
-        }
+        std::string mapping = os::mapping_of(fault);
+        if (mapping.empty())
+            fl::log_write("FATAL", "fault address is not mapped");
+        else
+            fl::log_write("FATAL", "fault address mapping: %s", mapping.c_str());
     }
     fl::log_write("FATAL", "signal %d (%s) at rip %s, fault address %s", sig, strsignal(sig), rip, fa);
     fl::log_write("FATAL", "rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx", (unsigned long long)g[os::kRax],
@@ -293,33 +284,16 @@ void dump_handler(int, siginfo_t*, void* uc_) {
 }
 
 void dump_threads() {
-    pid_t self = static_cast<pid_t>(os::thread_id());
-    DIR* dir = opendir("/proc/self/task");
-    if (!dir) return;
+    const uint64_t self = os::thread_id();
+    std::vector<os::ThreadInfo> threads = os::list_threads();
+    if (threads.empty()) return;
     fl::log_write("threads", "==== thread dump");
     peek_globals();
-    while (dirent* e = readdir(dir)) {
-        if (e->d_name[0] == '.') continue;
-        pid_t tid = atoi(e->d_name);
-        if (tid == self) continue;
-        char comm[64] = "?";
-        if (FILE* f = fopen(("/proc/self/task/" + std::string(e->d_name) + "/comm").c_str(), "r")) {
-            if (fgets(comm, sizeof comm, f)) comm[strcspn(comm, "\n")] = 0;
-            fclose(f);
-        }
-        // CPU time so far (utime + stime, fields 14-15 of stat): two dumps a
-        // few seconds apart show which threads burn CPU.
-        double cpu = 0;
-        if (FILE* f = fopen(("/proc/self/task/" + std::string(e->d_name) + "/stat").c_str(), "r")) {
-            char line[1024];
-            if (fgets(line, sizeof line, f))
-                if (const char* p = strrchr(line, ')')) {
-                    unsigned long long ut = 0, st = 0;
-                    if (sscanf(p + 2, "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu", &ut, &st) == 2)
-                        cpu = double(ut + st) / sysconf(_SC_CLK_TCK);
-                }
-            fclose(f);
-        }
+    for (const os::ThreadInfo& t : threads) {
+        if (t.tid == self) continue;
+        const int tid = static_cast<int>(t.tid);
+        const char* comm = t.name.c_str();
+        const double cpu = t.cpu_seconds;
         g_dump_done = 0;
         g_dump_buf[0] = 0;
         os::signal_thread(tid, kDumpSignal);
@@ -327,7 +301,6 @@ void dump_threads() {
         fl::log_write("threads", "thread %d (%s) cpu %.2fs %s", tid, comm, cpu,
                       g_dump_done ? g_dump_buf : "did not answer\n");
     }
-    closedir(dir);
 }
 
 std::atomic<int64_t> g_last_present_ns{0};
