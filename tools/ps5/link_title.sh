@@ -28,9 +28,20 @@ cc="$root/tools/ps5/cc.sh"
 # stacks, and libc functions a title lacks are bound to the platform's.
 # RADV_ARCHIVE names the Vulkan driver; without it an empty archive stands in.
 archive=${RADV_ARCHIVE:-}
+agc_stubs=()
 if [[ -z $archive ]]; then
   archive="$work/no-driver.a"
   [[ -f $archive ]] || "$sdk/bin/llvm-ar" rc "$archive"
+else
+  # RADV calls AGC, which the SDK has no stubs for: PS5_Vulkan's link stubs
+  # (the ones rpcs3-PS5's link-title.sh uses) stand in at link time.
+  mkdir -p "$work/stubs"
+  for pair in libSceAgc:agc_canary_link_stub.c libSceAgcDriver:agc_driver_canary_link_stub.c; do
+    lib=${pair%%:*}
+    "$cc" -std=c11 -O2 -fPIC -c "$vulkan/vendor/ps5/sdk/stubs/${pair#*:}" -o "$work/stubs/$lib.o"
+    "$sdk/bin/prospero-lld" --shared -soname "$lib.prx" -o "$work/stubs/$lib.so" "$work/stubs/$lib.o"
+    agc_stubs+=("$work/stubs/$lib.so")
+  done
 fi
 # The recipe looks for clang's builtins at <resource-dir>/lib/linux/
 # libclang_rt.builtins-x86_64.a; Fedora keeps them in lib/<triple>/
@@ -52,13 +63,13 @@ printf '{\n    local: *;\n};\n' > "$work/title-local.map"
   "${radv_link_flags[@]}" --version-script "$work/title-local.map" \
   --version-script "$native/app-symbols.map" --exclude-libs=ALL \
   -e _start -o "$work/llvm-pie.elf" "$work/app_crt.o" "$work/app_cpp_runtime.o" \
-  --start-group "$@" --end-group "${radv_link_inputs[@]}" \
+  --start-group "$@" --end-group "${agc_stubs[@]}" "${radv_link_inputs[@]}" \
   --as-needed "$sdk"/target/lib/*.so
 # A title doesn't get libkernel_sys, libkernel_web or libScePosixForWebKit:
 # imports only they export are NULL at run time (FINDINGS 7, PS5_PORT.md traps).
 null_imports=$(comm -23 \
   <("$sdk/bin/llvm-nm" -D --undefined-only "$work/llvm-pie.elf" | awk '$1 == "U" { sub(/@.*/, "", $2); print $2 }' | sort -u) \
-  <(for lib in "$sdk"/target/lib/*.so; do
+  <(for lib in "$sdk"/target/lib/*.so "${agc_stubs[@]}"; do
       case ${lib##*/} in libkernel_sys.so | libkernel_web.so | libScePosixForWebKit.so) continue ;; esac
       "$sdk/bin/llvm-nm" -D --defined-only "$lib" 2>/dev/null | awk '{ print $NF }'
     done | sort -u))
@@ -66,7 +77,9 @@ if [[ -n $null_imports ]]; then
   echo "link_title.sh: imports no title module exports (NULL at run time): ${null_imports//$'\n'/ }" >&2
   exit 1
 fi
-"$tool" link --in "$work/llvm-pie.elf" --out "$work/eboot.elf" --stub-dir "$sdk/target/lib" \
+stub_args=()
+for s in "${agc_stubs[@]}"; do stub_args+=(--stub "$s"); done
+"$tool" link --in "$work/llvm-pie.elf" --out "$work/eboot.elf" --stub-dir "$sdk/target/lib" "${stub_args[@]}" \
   --module-sdk 0x02000009 --companion-sdk 0x08050001 --file-name eboot.elf > /dev/null
 "$tool" self --sign --in "$work/eboot.elf" --out "$out" --magic 0x1D3D154F > /dev/null
 "$tool" self --inspect --file "$out" > /dev/null

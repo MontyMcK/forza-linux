@@ -173,4 +173,6 @@ void pump_events() {
     }
 }
 
+const char* dxvk_wsi_driver() { return "SDL3"; }
+
 }  // namespace fl::os

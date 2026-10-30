@@ -10,6 +10,7 @@ int sceKernelAllocateDirectMemory(int64_t start, int64_t end, size_t len, size_t
 int sceKernelReleaseDirectMemory(int64_t start, size_t len);
 int sceKernelMapDirectMemory(void** addr, size_t len, int prot, int flags, int64_t phys, size_t align);
 int64_t sceKernelGetDirectMemorySize(void);
+int sceKernelAvailableDirectMemorySize(int64_t start, int64_t end, size_t align, int64_t* phys, size_t* size);
 int sceKernelMprotect(const void* addr, size_t len, int prot);
 int sceKernelReserveVirtualRange(void** addr, size_t len, int flags, size_t align);
 int sceKernelMunmap(void* addr, size_t len);

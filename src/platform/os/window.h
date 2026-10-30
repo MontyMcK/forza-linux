@@ -10,6 +10,7 @@ void video_init();          // idempotent; also creates the window
 void* window();             // created on first call; the handle DXVK's swap chain is made for (Linux: SDL_Window*)
 void pump_events();         // called from CoreDispatcher::ProcessEvents
 void window_size(int* w, int* h);
-float refresh_rate();       // of the window's display, in Hz (0 if unknown)
+float refresh_rate();
+const char* dxvk_wsi_driver();  // DXVK native's WSI backend for this host (DXVK_WSI_DRIVER)       // of the window's display, in Hz (0 if unknown)
 
 }  // namespace fl::os

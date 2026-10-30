@@ -61,20 +61,45 @@ case $target in
     printf '%s\n' adler32 compress crc32 deflate gzclose gzlib gzread gzwrite infback inffast inflate inftrees trees uncompr zutil |
       xargs -P "$jobs" -I{} "$ps5_root/tools/ps5/cc.sh" -std=c11 -O2 -w -c "$zsrc/{}.c" -o "$out/zlib/{}.o"
     rm -f "$out/libz.a" && "$sdkbin/llvm-ar" rcs "$out/libz.a" "$out"/zlib/*.o
-    a="$ps5_root/third_party/addrlib"
-    find "$a/src" -name '*.cpp' | xargs -P "$jobs" -I{} sh -c '"$ps5_root/tools/ps5/cc.sh" -std=c++20 -O2 -w -fexceptions \
-      -DADDR_FASTCALL= -DLITTLEENDIAN_CPU -DDEBUG=0 -DADDR_ALLOW_SIMD=1 -I"$0/inc" -I"$0/src" -I"$0/src/core" \
-      -I"$0/src/chip/r800" -I"$0/src/chip/gfx9" -I"$0/src/chip/gfx10" -I"$0/src/chip/gfx11" -I"$0/src/chip/gfx12" \
-      -c "$1" -o "$out/addrlib/$(basename "$1" .cpp).o"' "$a" {}
-    rm -f "$out/libaddrlib.a" && "$sdkbin/llvm-ar" rcs "$out/libaddrlib.a" "$out"/addrlib/*.o
+    dxvk="$ps5_root/build-ps5/dxvk/install/lib"
+    radv="$ps5_root/build-ps5/deps/PS5_Vulkan/.deps/native/radv-release/lib/libvulkan_radeon.ps5.a"
+    use_radv=0
+    [[ -f $dxvk/libdxvk_d3d11.a && -f $radv ]] && use_radv=1
+    # RADV (linked whole) carries Mesa's addrlib: with it, use that copy and
+    # its headers instead of third_party/addrlib (the symbols would clash).
+    addr_inc="$ps5_root/third_party/addrlib/inc"
+    addr_lib=()
+    if (( use_radv )); then
+      addr_inc="$ps5_root/build-ps5/deps/PS5_Mesa/src/amd/addrlib/inc"
+    else
+      a="$ps5_root/third_party/addrlib"
+      find "$a/src" -name '*.cpp' | xargs -P "$jobs" -I{} sh -c '"$ps5_root/tools/ps5/cc.sh" -std=c++20 -O2 -w -fexceptions \
+        -DADDR_FASTCALL= -DLITTLEENDIAN_CPU -DDEBUG=0 -DADDR_ALLOW_SIMD=1 -I"$0/inc" -I"$0/src" -I"$0/src/core" \
+        -I"$0/src/chip/r800" -I"$0/src/chip/gfx9" -I"$0/src/chip/gfx10" -I"$0/src/chip/gfx11" -I"$0/src/chip/gfx12" \
+        -c "$1" -o "$out/addrlib/$(basename "$1" .cpp).o"' "$a" {}
+      rm -f "$out/libaddrlib.a" && "$sdkbin/llvm-ar" rcs "$out/libaddrlib.a" "$out"/addrlib/*.o
+      addr_lib=("$out/libaddrlib.a")
+    fi
+    export addr_inc
     find "$ps5_root/src" \( -name '*.cpp' -o -name '*.S' \) -not -path '*/platform/os/linux/*' | sort > "$out/sources.txt"
     xargs -P "$jobs" -I{} sh -c 'o="$out/obj/$(echo "$1" | sed "s|$ps5_root/src/||; s|/|_|g").o"
       "$ps5_root/tools/ps5/cc-win.sh" -std=c++20 -O2 -g -Wall -Wextra -Wno-unused-parameter -fno-exceptions -fno-strict-aliasing \
-        -I"$ps5_root/src" -I"$ps5_root/third_party/addrlib/inc" -I"$zsrc" -c "$1" -o "$o"' _ {} < "$out/sources.txt"
-    # No PS5 DXVK yet: its entry points fail loudly (tools/ps5/m1/no_dxvk.cpp).
-    "$ps5_root/tools/ps5/cc-win.sh" -std=c++20 -O2 -fno-exceptions -I"$ps5_root/src" \
-      -c "$ps5_root/tools/ps5/m1/no_dxvk.cpp" -o "$out/no_dxvk.o"
-    "$ps5_root/tools/ps5/link_title.sh" "$out/eboot.bin" "$out"/obj/*.o "$out/no_dxvk.o" "$out/libaddrlib.a" "$out/libz.a"
+        -I"$ps5_root/src" -I"$addr_inc" -I"$zsrc" -c "$1" -o "$o"' _ {} < "$out/sources.txt"
+    if (( use_radv )); then
+      # DXVK (tools/ps5/build_dxvk.sh) on PS5_Vulkan's RADV
+      gfx=("$dxvk"/libdxvk_d3d11.a "$dxvk"/libdxvk_dxgi.a "$dxvk"/libdxvk.a "$dxvk"/libwsi.a "$dxvk"/libvkcommon.a
+           "$dxvk"/libutil.a "$dxvk"/libspirv.a "$dxvk"/libdxbc_spv.a "$dxvk"/libdisplay-info.a)
+      export RADV_ARCHIVE="$radv"
+    else
+      # No PS5 DXVK yet: its entry points fail loudly (tools/ps5/m1/no_dxvk.cpp).
+      "$ps5_root/tools/ps5/cc-win.sh" -std=c++20 -O2 -fno-exceptions -I"$ps5_root/src" \
+        -c "$ps5_root/tools/ps5/m1/no_dxvk.cpp" -o "$out/no_dxvk.o"
+      gfx=("$out/no_dxvk.o")
+    fi
+    # RADV's archive also carries zlib (1.3.1): with it, the title takes that copy.
+    zlib=("$out/libz.a")
+    (( use_radv )) && zlib=()
+    "$ps5_root/tools/ps5/link_title.sh" "$out/eboot.bin" "$out"/obj/*.o "${gfx[@]}" "${addr_lib[@]}" "${zlib[@]}"
     "$ps5_root/tools/ps5/package.sh" "$out/eboot.bin" ;;
   launch)
     out="$ps5_root/build-ps5/launch"

@@ -74,14 +74,18 @@ fi
 rm -rf "$install" && mkdir -p "$install/lib"
 sdkbin="$sdk/bin"
 for t in d3d11 dxgi; do
-  objs=("$build"/src/$t/libdxvk_$t.so.*.p/*.o)
+  # find, not a glob: objects of sources outside the folder are named ".._d3d10_..." (hidden to *.o)
+  mapfile -t objs < <(find "$build"/src/$t/libdxvk_$t.so.*.p -maxdepth 1 -name '*.o' | sort)
   [[ -e ${objs[0]} ]] || { echo "PS5 DXVK: no $t objects" >&2; exit 1; }
   "$sdkbin/prospero-ar" rcs "$install/lib/libdxvk_$t.a" "${objs[@]}"
 done
+# Each DXVK module defines its own Logger::s_instance; linked into one
+# binary they would clash, so dxgi's becomes local (one log for both).
+"$sdkbin/prospero-objcopy" --localize-symbol=_ZN4dxvk6Logger10s_instanceE "$install/lib/libdxvk_dxgi.a"
 for a in src/dxvk/libdxvk.a src/spirv/libspirv.a src/util/libutil.a src/vulkan/libvkcommon.a src/wsi/libwsi.a \
          subprojects/dxbc-spirv/libdxbc_spv.a subprojects/libdisplay-info/libdisplay-info.a; do
   # Meson's archives are thin (they point at the objects): make real ones.
-  objs=("$build/$a.p"/*.o)
+  mapfile -t objs < <(find "$build/$a.p" -maxdepth 1 -name '*.o' | sort)
   [[ -e ${objs[0]} ]] || { echo "PS5 DXVK: $a has no objects" >&2; exit 1; }
   "$sdkbin/prospero-ar" rcs "$install/lib/$(basename "$a")" "${objs[@]}"
 done

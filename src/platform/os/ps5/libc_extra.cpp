@@ -1,8 +1,12 @@
 // libc functions the runtime uses that a PS5 title doesn't get from the
 // console (the link leaves them undefined). Our own implementations.
 #include <cerrno>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <ctime>
+#include <fcntl.h>
 #include <sys/types.h>
 
 extern "C" {
@@ -27,7 +31,7 @@ time_t timegm(struct tm* t) {
     return static_cast<time_t>(days * 86400 + t->tm_hour * 3600LL + t->tm_min * 60LL + t->tm_sec);
 }
 
-const char* strsignal(int sig) {
+char* strsignal(int sig) {
     static thread_local char buf[32];
     snprintf(buf, sizeof buf, "signal %d", sig);
     return buf;
@@ -50,6 +54,25 @@ ssize_t readlink(const char*, char*, size_t) {
 }
 long pathconf(const char*, int) {
     errno = EINVAL;  // callers fall back to PATH_MAX
+    return -1;
+}
+
+// mkstemp: also libkernel_sys-only (DXVK's and Mesa's cache files use it).
+int mkstemp(char* tmpl) {
+    size_t n = strlen(tmpl);
+    if (n < 6 || strcmp(tmpl + n - 6, "XXXXXX") != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    static const char chars[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    for (int attempt = 0; attempt < 100; attempt++) {
+        uint32_t r[6];
+        arc4random_buf(r, sizeof r);
+        for (int i = 0; i < 6; i++) tmpl[n - 6 + i] = chars[r[i] % (sizeof chars - 1)];
+        int fd = open(tmpl, O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd >= 0 || errno != EEXIST) return fd;
+    }
+    errno = EEXIST;
     return -1;
 }
 

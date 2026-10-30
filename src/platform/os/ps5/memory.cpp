@@ -137,7 +137,12 @@ bool commit(void* addr, size_t size, unsigned prot) {
         uint64_t re = u;
         while (re < uhi && block_at(re) == g_blocks.end()) re += kUnit;
         if (!back_run(u, re)) {
-            FL_ERROR("os: commit %p+0x%llx: no direct memory", reinterpret_cast<void*>(u), (unsigned long long)(re - u));
+            int64_t phys = 0;
+            size_t largest = 0;
+            sceKernelAvailableDirectMemorySize(0, sceKernelGetDirectMemorySize(), kUnit, &phys, &largest);
+            FL_ERROR("os: commit %p+0x%llx: no direct memory (we hold %llu MiB; largest free block %zu MiB of %lld MiB)",
+                     reinterpret_cast<void*>(u), (unsigned long long)(re - u), (unsigned long long)(g_committed.load() >> 20),
+                     largest >> 20, (long long)(sceKernelGetDirectMemorySize() >> 20));
             return false;
         }
         // Pages of the new units outside the request stay inaccessible (reserved).

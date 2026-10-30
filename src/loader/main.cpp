@@ -18,6 +18,7 @@
 #include "loader/thread_env.h"
 #include "platform/os/thread.h"
 #include "platform/os/process.h"
+#include "platform/os/window.h"
 
 namespace fl {
 
@@ -127,7 +128,7 @@ int main(int argc, char** argv) {
     apply_env_args(argc, argv);
     // dxvk-native refuses to start without a WSI choice. Set it before any
     // game thread exists (setenv is not thread-safe).
-    setenv("DXVK_WSI_DRIVER", "SDL3", 0);
+    setenv("DXVK_WSI_DRIVER", os::dxvk_wsi_driver(), 0);
     log_init();
     parse_args(argc, argv);
     loader::install_crash_handler();
