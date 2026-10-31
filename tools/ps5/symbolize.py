@@ -6,6 +6,7 @@ from the linked ELF the title was made from.
 
   tools/ps5/symbolize.py LOG [ELF]     ELF defaults to build-ps5/link/llvm-pie.elf
 """
+import bisect
 import os
 import re
 import subprocess
@@ -26,9 +27,18 @@ if addrs:
     out = subprocess.run(["llvm-symbolizer", "--obj=" + elf, "-C", "--functions=short", "--no-inlines",
                           "--relative-address"], input="\n".join(hex(a) for a in addrs), capture_output=True,
                          text=True, check=True).stdout
+    # Code without debug info (DXVK's and RADV's archives) gets "??" from the
+    # symbolizer: name it after the nearest symbol below instead.
+    syms = sorted((int(l.split()[0], 16), l.split(None, 2)[2]) for l in nm.splitlines()
+                  if len(l.split(None, 2)) == 3 and l.split()[1] in "tTwW")
+    starts = [a for a, _ in syms]
     for a, block in zip(addrs, out.strip().split("\n\n")):
         fn, src = (block.splitlines() + ["", ""])[:2]
-        names[a] = "%s (%s)" % (fn, os.path.relpath(src, root) if src.startswith("/") else src)
+        if fn == "??":
+            i = bisect.bisect_right(starts, a) - 1
+            names[a] = "%s+0x%x" % (syms[i][1], a - syms[i][0]) if i >= 0 else "??"
+        else:
+            names[a] = "%s (%s)" % (fn, os.path.relpath(src, root) if src.startswith("/") else src)
 for l in lines:
     m = frame.search(l)
     print(l + ("  <- " + names[anchor + int(m.group(1)) - 1] if m else ""))

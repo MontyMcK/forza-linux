@@ -108,6 +108,14 @@ struct File : KObject {
     uint64_t last_use = 0;  // pooled: for evicting the least recently used
     std::mutex pos_mutex;   // synchronous I/O on one handle is serialized, as on Windows
     int64_t pos = 0;        // the handle's file pointer
+    // Pooled files of the game's dump (read-only, never written): small reads
+    // come from a window read in one call (read_at). Freed with the fd.
+    bool windowed = false;
+    std::mutex window_mutex;
+    std::unique_ptr<uint8_t[]> window;
+    int64_t window_off = 0;
+    size_t window_len = 0;
+    int64_t window_next = 0;  // where the last small read ended
     bool overlapped = false;
     std::string path;
     std::shared_ptr<Iocp> port;
@@ -158,7 +166,44 @@ void pool_add(File* f) {
     if (!lru) return;
     close(lru->fd);
     lru->fd = -1;
+    lru->window.reset();  // idle (users == 0): no read_at is using it
     g_pool_open.erase(std::find(g_pool_open.begin(), g_pool_open.end(), lru));
+}
+
+// Small reads of the game's files cost ~0.3-0.8 ms each on the PS5 whatever
+// their size (FINDINGS 7.15), and the game makes hundreds a frame while it
+// streams: they are served from a kWindow read at the first one.
+constexpr size_t kWindow = 128 << 10;
+
+ssize_t read_at(File& f, int fd, void* buf, size_t n, int64_t off) {
+    if (!f.windowed || n > kWindow / 2) return pread(fd, buf, n, off);
+    {
+        std::lock_guard lock(f.window_mutex);
+        bool hit = f.window && off >= f.window_off && off + int64_t(n) <= f.window_off + int64_t(f.window_len);
+        // Read ahead only for a read that continues the last one: random small
+        // reads (several streaming threads on one archive) would just thrash it.
+        bool sequential = off == f.window_next;
+        f.window_next = off + int64_t(n);
+        if (!hit && sequential) {
+            if (!f.window) f.window = std::make_unique<uint8_t[]>(kWindow);
+            int64_t start = off & ~int64_t(4095);
+            ssize_t r = pread(fd, f.window.get(), kWindow, start);
+            if (r < 0) {
+                f.window_len = 0;
+                return r;
+            }
+            f.window_off = start;
+            f.window_len = size_t(r);
+            hit = true;
+        }
+        if (hit) {
+            int64_t avail = f.window_off + int64_t(f.window_len) - off;
+            size_t k = avail > 0 ? std::min(n, size_t(avail)) : 0;  // short at the end of the file
+            memcpy(buf, f.window.get() + (off - f.window_off), k);
+            return ssize_t(k);
+        }
+    }
+    return pread(fd, buf, n, off);
 }
 
 // The descriptor of f for one I/O call (-1 and errno if it can't be reopened).
@@ -297,6 +342,7 @@ HANDLE open_file(const std::string& win, DWORD access, DWORD disposition, DWORD 
     f->path = host;
     if (oflags == O_RDONLY && !(existed && S_ISDIR(st.st_mode))) {
         f->pooled = true;
+        f->windowed = host.rfind(config().game_dir, 0) == 0;
         std::lock_guard lock(g_pool_mutex);
         pool_add(f.get());
     }
@@ -366,7 +412,7 @@ BOOL do_io(HANDLE h, void* buf, DWORD n, DWORD* done, Overlapped* ov, bool is_wr
     if (ov) {
         off_t off = (static_cast<off_t>(ov->OffsetHigh) << 32) | ov->Offset;
         if (!is_write) os::write_watch_before_kernel_write(buf, n);
-        ssize_t r = is_write ? pwrite(fd.fd, buf, n, off) : pread(fd.fd, buf, n, off);
+        ssize_t r = is_write ? pwrite(fd.fd, buf, n, off) : read_at(*f, fd.fd, buf, n, off);
         if (r < 0) {
             set_last_error(errno_to_win(errno));
             return FALSE_;
@@ -389,7 +435,7 @@ BOOL do_io(HANDLE h, void* buf, DWORD n, DWORD* done, Overlapped* ov, bool is_wr
     size_t total = 0;
     while (total < n) {
         ssize_t r = is_write ? pwrite(fd.fd, static_cast<uint8_t*>(buf) + total, n - total, f->pos)
-                             : pread(fd.fd, static_cast<uint8_t*>(buf) + total, n - total, f->pos);
+                             : read_at(*f, fd.fd, static_cast<uint8_t*>(buf) + total, n - total, f->pos);
         if (r < 0) {
             if (errno == EINTR) continue;
             set_last_error(errno_to_win(errno));

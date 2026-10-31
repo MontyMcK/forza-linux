@@ -18,6 +18,10 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <thread>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -73,6 +77,53 @@ constexpr HRESULT E_BOUNDS_ = static_cast<HRESULT>(0x8000000B);
 constexpr int64_t kQuotaBytes = 64ll << 20;  // STUB: per-user quota (the console's value is not known)
 
 std::mutex g_io;  // one save operation at a time
+
+// Commits run on one host thread (write-behind): on the PS5 a commit to /data
+// took seconds (writes, fsyncs, renames, unlinks), and the game's update
+// thread waited for its autosaves, freezing the picture (FINDINGS 7.16).
+// Everything else that touches save files takes io_lock(), which waits for
+// the queued commits first, so it sees every update the game submitted.
+std::mutex g_queue_mutex;
+std::condition_variable g_queue_cv;
+std::deque<std::function<void()>> g_queue;
+bool g_busy = false;  // the commit thread is running a job
+
+void queue_commit(std::function<void()> job) {
+    static std::once_flag started;
+    std::call_once(started, [] {
+        std::thread([] {
+            for (;;) {
+                std::function<void()> next;
+                {
+                    std::unique_lock q(g_queue_mutex);
+                    g_queue_cv.wait(q, [] { return !g_queue.empty(); });
+                    next = std::move(g_queue.front());
+                    g_queue.pop_front();
+                    g_busy = true;
+                }
+                next();
+                {
+                    std::lock_guard q(g_queue_mutex);
+                    g_busy = false;
+                }
+                g_queue_cv.notify_all();
+            }
+        }).detach();
+    });
+    {
+        std::lock_guard q(g_queue_mutex);
+        g_queue.push_back(std::move(job));
+    }
+    g_queue_cv.notify_all();
+}
+
+std::unique_lock<std::mutex> io_lock() {
+    {
+        std::unique_lock q(g_queue_mutex);
+        g_queue_cv.wait(q, [] { return g_queue.empty() && !g_busy; });
+    }
+    return std::unique_lock<std::mutex>(g_io);
+}
 
 // ---------------------------------------------------------------- names and files
 
@@ -546,7 +597,7 @@ struct InfoQuery : Object {
 };
 
 std::vector<InfoEntry> list_containers(const std::string& space_dir, const std::u16string& prefix) {
-    std::lock_guard lock(g_io);
+    auto lock = io_lock();
     std::vector<InfoEntry> out;
     for (const std::string& f : list_dir(space_dir)) {
         if (f.size() > 4 && (f.ends_with(".new") || f.ends_with(".old"))) continue;
@@ -612,11 +663,22 @@ struct Container : Object {
         std::map<std::u16string, std::vector<uint8_t>> writes;
         if (!read_buffer_map(writes_map, &writes)) return *out = action_done(E_INVALIDARG), S_OK;
         std::vector<std::u16string> del = read_string_iterable(deletes);
-        HRESULT hr = self(i)->commit(writes, del);
-        FL_LOG(winrt, "ConnectedStorage: %s: wrote %zu blob(s), deleted %zu -> 0x%08x",
-               utf16_to_utf8(self(i)->name).c_str(), writes.size(), del.size(), static_cast<uint32_t>(hr));
-        if (hr < 0) FL_ERROR("ConnectedStorage: commit of %s failed", self(i)->dir.c_str());
-        *out = action_done(hr);
+        // Written behind (queue_commit): the game sees it done at once; a
+        // failure is logged as an ERROR (it can't be reported to the game).
+        Container* c = self(i);
+        c->add_ref();
+        queue_commit([c, writes = std::move(writes), del = std::move(del)] {
+            double t0 = run_time();
+            size_t bytes = 0;
+            for (auto& [k, v] : writes) bytes += v.size();
+            HRESULT hr = c->commit(writes, del);
+            log_write("winrt", "ConnectedStorage: %s: wrote %zu blob(s) (%zu KiB), deleted %zu in %.0f ms -> 0x%08x",
+                      utf16_to_utf8(c->name).c_str(), writes.size(), bytes >> 10, del.size(),
+                      (run_time() - t0) * 1000, static_cast<uint32_t>(hr));
+            if (hr < 0) FL_ERROR("ConnectedStorage: commit of %s failed", c->dir.c_str());
+            c->release();
+        });
+        *out = action_done(S_OK);
         return S_OK;
     }
     // Container2 S+0 SubmitUpdatesAsync(writes, deletes, displayName)
@@ -629,7 +691,7 @@ struct Container : Object {
         auto* c = self(i);
         std::vector<std::u16string> names = read_string_iterable(names_iterable);
         auto* map = new BufferMap();
-        std::lock_guard lock(g_io);
+        auto lock = io_lock();
         std::string parent = c->dir.substr(0, c->dir.rfind('/'));
         container_dir(parent, c->name);
         for (const auto& n : names) {
@@ -696,7 +758,7 @@ struct Space : Object {
     static WINAPI HRESULT DeleteContainer(Iface* i, HSTRING name, void** out) {
         std::u16string n = hstring_str(name);
         {
-            std::lock_guard lock(g_io);
+            auto lock = io_lock();
             remove_tree(container_dir(self(i)->dir, n));
         }
         FL_LOG(winrt, "ConnectedStorage: deleted container %s", utf16_to_utf8(n).c_str());

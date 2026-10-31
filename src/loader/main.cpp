@@ -131,6 +131,10 @@ int main(int argc, char** argv) {
     setenv("DXVK_WSI_DRIVER", os::dxvk_wsi_driver(), 0);
     log_init();
     parse_args(argc, argv);
+    // DXVK keeps translated shaders under XDG_CACHE_HOME or HOME; a PS5
+    // title has neither, so it would translate every shader again each run.
+    if (!getenv("DXVK_SHADER_CACHE_PATH") && !getenv("XDG_CACHE_HOME") && !getenv("HOME"))
+        setenv("DXVK_SHADER_CACHE_PATH", (config().data_dir + "/dxvk-cache").c_str(), 0);
     loader::install_crash_handler();
     log_write("loader", "game dir: %s", config().game_dir.c_str());
     log_write("loader", "data dir: %s", config().data_dir.c_str());

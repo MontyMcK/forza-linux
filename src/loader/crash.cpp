@@ -324,17 +324,20 @@ int64_t mono_ns() {
     return ts.tv_sec * 1'000'000'000LL + ts.tv_nsec;
 }
 
+// FL_WATCHDOG=<seconds>: dump the threads after that long without a Present
+// (default 15; 0 turns it off). A low value catches multi-second freezes.
 void start_watchdog() {
     const char* e = getenv("FL_WATCHDOG");
-    if (e && !strcmp(e, "0")) return;
-    std::thread([] {
+    double limit = e ? atof(e) : 15;
+    if (limit <= 0) return;
+    std::thread([limit] {
         bool reported = false;
         for (;;) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            std::this_thread::sleep_for(std::chrono::milliseconds(limit < 4 ? 250 : 1000));
             int64_t last = g_last_present_ns.load(std::memory_order_relaxed);
             if (!last) continue;  // not presenting yet
             int64_t idle = mono_ns() - last;
-            if (idle < 15'000'000'000LL) {
+            if (idle < int64_t(limit * 1e9)) {
                 reported = false;
                 continue;
             }

@@ -455,3 +455,9 @@ Where things stand (Monty asked for a handoff):
 - os_test now prints host COST lines; in a PS5 title mprotect is ~28.5 us and clock_gettime ~877 ns (FINDINGS 7.13). Added os::monotonic_ns (TSC on the PS5) and compare mode for small placement buffers. In game the PS5 went from ~13 fps to a steady 30 fps.
 - Linux check: os_test, gcn_layout_test, concrt_token_test pass, FL_EXIT_AFTER_FRAME=600 clean; in game with FL_COMPARE_BELOW=16384 for 5 min: 30 fps, no errors.
 - **Next:** Monty plays a while (crashes, missing graphics); the title-screen 3D background (still missing?); M2 card still unanswered; then the launcher (M3), audio (M6).
+
+## 2026-10-31: Claude: optimisation pass (Monty: stutters, slowdowns, leaks)
+
+- Leak check over ~4 min in game: our direct memory steady ~2.3 GiB (decommits return memory now), flexible 294 MiB, threads 89; event handles creep (+0.4/s, unexplained yet). Fixed: decommit kept memory, reservations never reused address space, watched ranges outlived their memory.
+- Stutter causes found with the per-hitch counters: slow small reads (read window), DXVK shader cache had no path (now in the data dir), autosaves blocking the update thread for seconds (write-behind commits). Remaining: present waits of 2-5 s (DXVK acquireNextImage) during gameplay and loading; frees cost ~0.1 ms each (90-140 in some frames).
+- **Next:** per-hitch DXVK counters (GPU idle, syncs) to tell a busy GPU from a stalled submission; get DXVK's threads into the dumps; check the event-handle growth on Linux.

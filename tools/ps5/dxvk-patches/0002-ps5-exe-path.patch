@@ -1,0 +1,16 @@
+From: Open Horizon 2 PS5 port
+Subject: [PATCH] PS5: a fixed executable path (the shader cache is named after it)
+
+--- a/src/util/util_env.cpp	2026-10-31 13:31:09.181824944 +1300
++++ b/src/util/util_env.cpp	2026-10-31 13:31:09.188856867 +1300
+@@ -102,6 +102,10 @@
+     size_t count = readlink("/proc/self/exe", exePath.data(), exePath.size());
+ 
+     return std::string(exePath.begin(), exePath.begin() + count);
++#elif defined(DXVK_PS5)
++    // A PS5 title's executable is always this (the shader cache names its
++    // files after it; the FreeBSD sysctl below isn't for titles).
++    return "/app0/eboot.bin";
+ #elif defined(__FreeBSD__)
+     int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, getpid()};
+     char exePath[PATH_MAX] = {};
