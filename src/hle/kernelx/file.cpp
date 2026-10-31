@@ -28,6 +28,8 @@
 #include "hle/kernelx/sync_objects.h"
 #include "hle/kernelx/vfs.h"
 #include "hle/registry.h"
+#include "common/perf.h"
+#include "platform/os/clock.h"
 #include "platform/os/files.h"
 #include "platform/os/write_watch.h"
 
@@ -168,7 +170,10 @@ struct HostFd {
         std::lock_guard lock(g_pool_mutex);
         if (f.fd < 0) {
             double t0 = run_time();
-            f.fd = open(f.path.c_str(), O_RDONLY | O_CLOEXEC);
+            {
+                perf::Timed timed(perf::kFileOpens, perf::kFileOpenNs);
+                f.fd = open(f.path.c_str(), O_RDONLY | O_CLOEXEC);
+            }
             note_reopen(run_time() - t0, f.path);
             if (f.fd < 0) {
                 FL_ERROR("file: reopening %s failed: %s", f.path.c_str(), strerror(errno));
@@ -248,6 +253,7 @@ bool skip_movie(const std::string& win) {
 #endif
 
 HANDLE open_file(const std::string& win, DWORD access, DWORD disposition, DWORD flags) {
+    perf::Timed timed(perf::kFileOpens, perf::kFileOpenNs);
 #ifdef FL_DEV_SKIP_MOVIES
     if (skip_movie(win)) {
         ::fl::log_write("file", "skipping movie '%s' (FL_SKIP_MOVIES, developer build)", win.c_str());
@@ -339,6 +345,19 @@ void complete(File& f, Overlapped* ov, DWORD status, DWORD bytes) {
 }
 
 BOOL do_io(HANDLE h, void* buf, DWORD n, DWORD* done, Overlapped* ov, bool is_write) {
+    uint64_t t0 = os::monotonic_ns();
+    struct Count {  // reads, for FL_LOG=fps hitch reports
+        bool on;
+        uint64_t t0;
+        DWORD* done;
+        DWORD n;
+        ~Count() {
+            if (!on) return;
+            perf::add(perf::kFileReads);
+            perf::add(perf::kFileReadBytes, done ? *done : n);
+            perf::add(perf::kFileReadNs, os::monotonic_ns() - t0);
+        }
+    } count{!is_write, t0, done, n};
     auto f = get_file(h);
     if (!f) return set_last_error(ERROR_INVALID_HANDLE), FALSE_;
     if (done) *done = 0;

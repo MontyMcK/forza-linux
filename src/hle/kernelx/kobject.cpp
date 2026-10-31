@@ -1,5 +1,6 @@
 #include "hle/kernelx/kobject.h"
 
+#include <algorithm>
 #include <chrono>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -34,6 +35,20 @@ std::shared_ptr<KObject> handle_get(HANDLE h) {
     std::lock_guard lock(g_table_mutex);
     auto it = g_table.find(reinterpret_cast<uint64_t>(h));
     return it == g_table.end() ? nullptr : it->second;
+}
+
+std::string handle_summary() {
+    static const char* const kNames[] = {"event", "mutex", "semaphore", "thread", "file", "find", "iocp", "module", "other"};
+    size_t counts[9] = {}, total;
+    {
+        std::lock_guard lock(g_table_mutex);
+        total = g_table.size();
+        for (auto& [h, o] : g_table) counts[std::min<size_t>(8, static_cast<size_t>(o->type))]++;
+    }
+    std::string out = "handles " + std::to_string(total) + ":";
+    for (int i = 0; i < 9; i++)
+        if (counts[i]) out += std::string(" ") + kNames[i] + " " + std::to_string(counts[i]);
+    return out;
 }
 
 bool handle_close(HANDLE h) {

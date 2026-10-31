@@ -82,4 +82,17 @@ uint64_t resident_bytes() {
     return rss * page_size();
 }
 
+std::string memory_report() {
+    unsigned long long rss = 0, peak = 0, kb;
+    if (FILE* f = fopen("/proc/self/status", "r")) {
+        char line[256];
+        while (fgets(line, sizeof line, f)) {
+            if (sscanf(line, "VmRSS: %llu", &kb) == 1) rss = kb;
+            if (sscanf(line, "VmHWM: %llu", &kb) == 1) peak = kb;
+        }
+        fclose(f);
+    }
+    return "resident " + std::to_string(rss >> 10) + " MiB (peak " + std::to_string(peak >> 10) + " MiB)";
+}
+
 }  // namespace fl::os

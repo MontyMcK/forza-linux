@@ -136,11 +136,10 @@ std::unique_lock<std::shared_mutex> unmap_guard() { return std::unique_lock(g_un
 void set_remap_hook(RemapFn fn) { g_remap_hook = fn; }
 
 void notify_remap(const void* addr, size_t size) {
-    if (RemapFn fn = g_remap_hook.load()) {
-        uint64_t start, end;
-        page_range(addr, size, &start, &end);
-        fn(start, end);
-    }
+    uint64_t start, end;
+    page_range(addr, size, &start, &end);
+    os::write_watch_unregister(start, end);
+    if (RemapFn fn = g_remap_hook.load()) fn(start, end);
 }
 
 }  // namespace fl::d3d::gpumem

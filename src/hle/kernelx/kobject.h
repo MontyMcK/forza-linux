@@ -7,6 +7,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <memory>
+#include <string>
 #include <mutex>
 #include <span>
 #include <vector>
@@ -44,6 +45,8 @@ std::mutex& wait_lock();
 HANDLE handle_add(std::shared_ptr<KObject> obj);
 std::shared_ptr<KObject> handle_get(HANDLE h);
 bool handle_close(HANDLE h);
+// Open handles by type, e.g. "handles 812: event 300, thread 60, file 420" (FL_LOG=fps leak watch).
+std::string handle_summary();
 
 template <typename T>
 std::shared_ptr<T> handle_get_as(HANDLE h, ObjType type) {

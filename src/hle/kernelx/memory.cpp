@@ -13,6 +13,7 @@
 #include "hle/kernelx/kobject.h"
 #include "hle/registry.h"
 #include "platform/os/memory.h"
+#include "common/perf.h"
 #include "hle/game_heap.h"
 
 namespace fl::kx {
@@ -44,6 +45,7 @@ std::mutex g_vm_mutex;
 std::map<uint64_t, uint64_t> g_regions;
 
 WINAPI void* kx_VirtualAlloc(void* addr, SIZE_T size, DWORD type, DWORD protect) {
+    perf::Timed timed(perf::kCommits, perf::kCommitNs);
     if (type & ~kKnownTypeBits)
         FL_LOG(memory, "VirtualAlloc: unknown type bits 0x%x (Xbox-specific?)", type & ~kKnownTypeBits);
     if (protect & ~0xFFu) FL_LOG(memory, "VirtualAlloc: extra protect bits 0x%x (Xbox-specific?)", protect & ~0xFFu);
@@ -89,6 +91,7 @@ WINAPI void* kx_VirtualAlloc(void* addr, SIZE_T size, DWORD type, DWORD protect)
 }
 
 WINAPI BOOL kx_VirtualFree(void* addr, SIZE_T size, DWORD type) {
+    perf::Timed timed(perf::kFrees, perf::kFreeNs);
     std::lock_guard lock(g_vm_mutex);
     auto base = reinterpret_cast<uint64_t>(addr);
     if (type & MEM_RELEASE) {

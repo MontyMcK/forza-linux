@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace fl::os {
 
@@ -43,5 +44,8 @@ size_t write_checked(void* dst, const void* src, size_t n);
 
 // This process's resident memory in bytes, or 0 if the host can't say.
 uint64_t resident_bytes();
+
+// One line on memory use for FL_LOG=fps (watched every 10 s for leaks).
+std::string memory_report();
 
 }  // namespace fl::os

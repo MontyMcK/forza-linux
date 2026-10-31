@@ -11,6 +11,7 @@
 #include <unordered_map>
 
 #include "common/log.h"
+#include "common/perf.h"
 #include "hle/kernelx/futex_lock.h"
 #include "hle/kernelx/kobject.h"
 #include "hle/registry.h"
@@ -142,6 +143,7 @@ void* thread_trampoline(void* arg) {
 // ---------------------------------------------------------------- threads
 
 WINAPI HANDLE kx_CreateThread(void* sa, SIZE_T stack, ThreadStart start, void* param, DWORD flags, DWORD* out_tid) {
+    perf::add(perf::kThreads);
     install_suspend_handler();
     auto t = std::make_shared<Thread>();
     t->start = start;

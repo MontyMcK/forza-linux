@@ -154,6 +154,19 @@ int main() {
     check(ok, "decommit drops contents, keeps the reservation");
     os::release(res, 2 * page);
 
+    // Decommitting whole 64 KiB units gives the memory back (the PS5 backend
+    // once kept it until release), and the range can be committed again.
+    auto* big = static_cast<uint8_t*>(os::map_anon(nullptr, 32 * page, os::kRead | os::kWrite, 0x10000));
+    std::memset(big, 0x33, 32 * page);
+    uint64_t rss_before = os::resident_bytes();
+    ok = big && os::decommit(big + 8 * page, 16 * page);
+    uint64_t rss_after = os::resident_bytes();
+    ok = ok && rss_after + 8 * page <= rss_before && os::commit(big + 8 * page, 16 * page, os::kRead | os::kWrite) &&
+         big[8 * page] == 0 && big[24 * page - 1] == 0 && big[8 * page - 1] == 0x33 && big[24 * page] == 0x33;
+    if (ok) big[10 * page] = 1;
+    check(ok, "decommit of whole units returns memory; committing again reads zero");
+    os::release(big, 32 * page);
+
     auto* code = static_cast<uint8_t*>(os::map_anon(nullptr, page, os::kRead | os::kWrite));
     const uint8_t ret42[] = {0xB8, 42, 0, 0, 0, 0xC3};  // mov eax, 42; ret
     std::memcpy(code, ret42, sizeof ret42);

@@ -129,4 +129,8 @@ bool pages_readable(uint64_t start, uint64_t end) {
 
 size_t write_watch_compare_below() { return 0; }
 
+void write_watch_unregister(uint64_t, uint64_t) {}
+
+void write_watch_stats(size_t* ranges, size_t* pages) { *ranges = *pages = 0; }
+
 }  // namespace fl::os

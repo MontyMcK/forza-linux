@@ -19,6 +19,8 @@
 
 #include "common/config.h"
 #include "common/log.h"
+#include "common/perf.h"
+#include "hle/kernelx/kobject.h"
 #include "loader/crash.h"
 #include "common/png.h"
 #include "hle/d3d11x/gpu_profile.h"
@@ -26,8 +28,11 @@
 #include "hle/d3d11x/d3d11x.h"
 #include "hle/d3d11x/dxvk.h"
 #include "hle/registry.h"
+#include "platform/os/clock.h"
+#include "platform/os/memory.h"
 #include "platform/os/window.h"
 #include "platform/os/process.h"
+#include "platform/os/write_watch.h"
 
 namespace fl::d3d {
 namespace {
@@ -334,16 +339,39 @@ std::string dxvk_stats(void* device, size_t frames) {
     return buf;
 }
 
+// What a slow frame did (common/perf.h counters and DXVK's pipeline count,
+// since the previous frame): where stutters come from.
+std::string frame_events(void* device) {
+    static uint64_t prev[perf::kCount] = {}, prev_pipes = 0;
+    uint64_t c[perf::kCount];
+    for (int i = 0; i < perf::kCount; i++) c[i] = perf::g_counters[i].load(std::memory_order_relaxed);
+    uint64_t stat[8] = {};
+    dxvk_xbox_stat_counters(device, stat, 8);
+    uint64_t pipes = stat[5] + stat[6] + stat[7];  // graphics, library, compute pipelines
+    auto d = [&](int i) { return c[i] - prev[i]; };
+    char buf[400];
+    snprintf(buf, sizeof buf,
+             "commits %llu (%.1f ms), frees %llu (%.1f ms), file reads %llu (%.1f MiB, %.1f ms), opens %llu "
+             "(%.1f ms), write faults %llu, uploads %llu, new threads %llu, pipelines +%llu",
+             (unsigned long long)d(perf::kCommits), d(perf::kCommitNs) / 1e6, (unsigned long long)d(perf::kFrees),
+             d(perf::kFreeNs) / 1e6, (unsigned long long)d(perf::kFileReads), d(perf::kFileReadBytes) / 1048576.0,
+             d(perf::kFileReadNs) / 1e6, (unsigned long long)d(perf::kFileOpens), d(perf::kFileOpenNs) / 1e6,
+             (unsigned long long)d(perf::kWriteFaults), (unsigned long long)d(perf::kUploads),
+             (unsigned long long)d(perf::kThreads), (unsigned long long)(pipes - prev_pipes));
+    memcpy(prev, c, sizeof prev);
+    prev_pipes = pipes;
+    return buf;
+}
+
 void frame_stats(void* device) {
     if (!log_enabled("fps")) return;
     static std::vector<double> ms;
     static int64_t last = 0, window = 0;
-    timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    int64_t now = ts.tv_sec * 1'000'000'000LL + ts.tv_nsec;
+    int64_t now = static_cast<int64_t>(os::monotonic_ns());
+    std::string events = frame_events(device);
     if (last) {
         ms.push_back((now - last) / 1e6);
-        if (ms.back() > 40) log_write("fps", "hitch: %.1f ms frame", ms.back());  // to line up with other events
+        if (ms.back() > 40) log_write("fps", "hitch: %.1f ms frame: %s", ms.back(), events.c_str());
     }
     last = now;
     if (!window) window = now;
@@ -374,6 +402,10 @@ void frame_stats(void* device) {
     log_write("fps", "  %s", placement_stats().c_str());
     log_write("fps", "  %s", context_stats().c_str());
     log_write("fps", "  %s", dxvk_stats(device, ms.size()).c_str());
+    size_t ranges, pages;
+    os::write_watch_stats(&ranges, &pages);
+    log_write("fps", "  memory: %s; %s; watching %zu ranges (%zu MiB)", os::memory_report().c_str(),
+              kx::handle_summary().c_str(), ranges, pages * os::page_size() >> 20);
     ms.clear();
     window = now;
 }

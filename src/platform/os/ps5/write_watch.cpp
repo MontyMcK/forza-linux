@@ -15,6 +15,7 @@
 #include <ctime>
 
 #include "common/log.h"
+#include "common/perf.h"
 #include "platform/os/memory.h"
 #include "platform/os/ps5/kernel.h"
 #include "platform/os/thread.h"
@@ -114,6 +115,40 @@ bool write_watch_register(uint64_t start, uint64_t end) {
     return true;
 }
 
+void write_watch_stats(size_t* ranges, size_t* pages) {
+    ReadLock lock;
+    *ranges = g_ranges.size();
+    *pages = 0;
+    for (auto& [start, r] : g_ranges) *pages += (r.end - start) / kPage;
+}
+
+void write_watch_unregister(uint64_t start, uint64_t end) {
+    std::unique_lock lock(g_mu);
+    g_writer = thread_id();
+    struct Clear { ~Clear() { g_writer = 0; } } clear;
+    auto it = g_ranges.upper_bound(start);
+    if (it != g_ranges.begin()) --it;
+    while (it != g_ranges.end() && it->first < end) {
+        uint64_t rs = it->first, re = it->second.end;
+        if (re <= start) {
+            ++it;
+            continue;
+        }
+        // Keep the parts outside [start, end), with their written flags.
+        Range old = std::move(it->second);
+        it = g_ranges.erase(it);
+        auto keep = [&](uint64_t a, uint64_t b) {
+            if (a >= b) return;
+            size_t pages = (b - a) / kPage;
+            Range r{b, std::make_unique<std::atomic<uint8_t>[]>(pages)};
+            for (size_t i = 0; i < pages; i++) r.written[i] = old.written[(a - rs) / kPage + i].load();
+            g_ranges.emplace(a, std::move(r));
+        };
+        keep(rs, std::min(start, re));
+        keep(std::max(end, rs), re);  // past end: the loop stops there
+    }
+}
+
 bool write_watch_reset(uint64_t start, uint64_t end, bool strict, WrittenFn on_written, void* user, size_t* calls) {
     ReadLock lock;
     uint64_t run = 0, run_end = 0;
@@ -173,6 +208,7 @@ bool write_watch_on_fault(uint64_t addr, bool) {
     }
     auto it = range_at(addr);
     if (it == g_ranges.end()) return false;
+    perf::add(perf::kWriteFaults);
     Range& r = it->second;
     uint64_t p = addr & ~(kPage - 1);
     uint32_t n = p == r.seq->next.load(std::memory_order_relaxed)

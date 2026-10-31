@@ -17,6 +17,7 @@
 #include "hle/d3d11x/gpumem.h"
 #include "hle/registry.h"
 #include "hle/xg/xg.h"
+#include "common/perf.h"
 #include "platform/os/clock.h"
 #include "platform/os/memory.h"
 #include "platform/os/write_watch.h"
@@ -313,6 +314,14 @@ std::string placement_stats() {
     snprintf(buf + n, sizeof buf - n, " = re-arm %.1f + readable %.1f + untile %.1f + UpdateSubresource %.1f ms",
              g_rearm_ns.exchange(0) / 1e6, g_readable_ns.exchange(0) / 1e6, g_untile_ns.exchange(0) / 1e6,
              g_update_ns.exchange(0) / 1e6);
+    size_t placed, pages;
+    {
+        std::lock_guard lock(g_placed_mutex);
+        placed = g_placed.size();
+        pages = g_page_users.size();
+    }
+    n = strlen(buf);
+    snprintf(buf + n, sizeof buf - n, "; %zu placed resources over %zu pages", placed, pages);
     return buf;
 }
 
@@ -336,6 +345,7 @@ void sync_compared(void* dxvk_ctx, Resource* r, bool stats) {
     if (same) return;
     r->shadow.assign(r->place, r->place + r->place_size);
     g_uploads.fetch_add(1, std::memory_order_relaxed);
+    perf::add(perf::kUploads);
     g_upload_bytes.fetch_add(r->place_size, std::memory_order_relaxed);
     Span t(&g_update_ns, stats);
     dx<void>(dxvk_ctx, dc::UpdateSubresource, r->dxvk, 0u, nullptr, static_cast<const void*>(r->shadow.data()), 0u, 0u);
@@ -408,6 +418,7 @@ void sync_placement(void* dxvk_ctx, Resource* r) {
     }
     timer.uploading = true;
     g_uploads.fetch_add(1, std::memory_order_relaxed);
+    perf::add(perf::kUploads);
     g_upload_bytes.fetch_add(r->place_size, std::memory_order_relaxed);
     {
         Span t(&g_rearm_ns, stats);

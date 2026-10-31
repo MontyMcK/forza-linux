@@ -18,6 +18,11 @@ bool write_watch_register(uint64_t start, uint64_t end);
 
 using WrittenFn = void (*)(uint64_t start, uint64_t end, void* user);
 
+// The memory of [start, end) was decommitted or released: stop watching it
+// (it reads as unwatched until registered again). Linux needs nothing:
+// userfaultfd drops a range with its mapping.
+void write_watch_unregister(uint64_t start, uint64_t end);
+
 // Reports every written page range of [start, end) to on_written and resets
 // those pages, so only later writes count. strict: fail (errno EPERM) if part
 // of the range isn't registered (the game remapped it); otherwise memory that
@@ -37,6 +42,10 @@ bool write_watch_on_fault(uint64_t addr, bool write);
 // a game buffer): a protected page would fail the write (EFAULT) instead of
 // faulting. Linux: nothing to do.
 void write_watch_before_kernel_write(void* addr, size_t size);
+
+// Watched ranges and pages (FL_LOG=fps leak watch); 0 where the host keeps
+// no list of its own (Linux).
+void write_watch_stats(size_t* ranges, size_t* pages);
 
 // Placement buffers smaller than this are compared with their last upload at
 // each use instead of watched: 0 where watching is nearly free (Linux), more

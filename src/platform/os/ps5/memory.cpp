@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -88,18 +89,56 @@ std::atomic<uint64_t> g_next_anywhere{kAnywhereLo};
 
 void* reserve_anywhere(size_t size, size_t align) {
     align = std::max(align, kUnit);
-    for (uint64_t hint = round_up(g_next_anywhere.load(), align); hint + size <= kAnywhereHi;) {
-        void* a = reinterpret_cast<void*>(hint);
-        if (sceKernelReserveVirtualRange(&a, size, 0, align) != 0) return nullptr;
-        uint64_t got = reinterpret_cast<uint64_t>(a);
-        if (got >= kAnywhereLo && got + size <= kAnywhereHi) {
-            g_next_anywhere = got + size;
-            return a;
+    // From where the last one ended, then once more from the bottom, so freed
+    // ranges are used again: only climbing would run out of the title's 1 TiB
+    // in a long session (large heap blocks come and go all the time).
+    uint64_t from = round_up(g_next_anywhere.load(), align);
+    for (int pass = 0; pass < 2; pass++) {
+        uint64_t stop = pass ? from : kAnywhereHi;
+        for (uint64_t hint = pass ? kAnywhereLo : from; hint < stop && hint + size <= kAnywhereHi;) {
+            void* a = reinterpret_cast<void*>(hint);
+            if (sceKernelReserveVirtualRange(&a, size, 0, align) != 0) return nullptr;
+            uint64_t got = reinterpret_cast<uint64_t>(a);
+            if (got >= kAnywhereLo && got + size <= kAnywhereHi) {
+                g_next_anywhere = got + size;
+                return a;
+            }
+            sceKernelMunmap(a, size);  // landed low: try further up
+            hint += std::max<uint64_t>(size, 1ull << 30);
         }
-        sceKernelMunmap(a, size);  // landed low: try further up
-        hint += std::max<uint64_t>(size, 1ull << 30);
     }
     return nullptr;
+}
+
+// Gives the direct memory of whole units [a, b) back; the range stays
+// reserved. A fixed reservation replaces the mapping in one call, so nothing
+// else can land in between. Caller holds g_mu.
+void unback(uint64_t a, uint64_t b) {
+    auto it = g_blocks.upper_bound(a);
+    if (it != g_blocks.begin()) --it;
+    while (it != g_blocks.end() && it->first < b) {
+        uint64_t s = it->first, e = s + it->second.len;
+        if (e <= a) {
+            ++it;
+            continue;
+        }
+        uint64_t x = std::max(a, s), y = std::min(b, e);
+        Block blk = it->second;
+        void* va = reinterpret_cast<void*>(x);
+        if (sceKernelReserveVirtualRange(&va, y - x, kMapFixed, kPage) != 0 || va != reinterpret_cast<void*>(x)) {
+            // Fall back to unmapping first (a short window without a reservation).
+            sceKernelMunmap(reinterpret_cast<void*>(x), y - x);
+            va = reinterpret_cast<void*>(x);
+            if (sceKernelReserveVirtualRange(&va, y - x, kMapFixed, kPage) != 0 || va != reinterpret_cast<void*>(x))
+                FL_ERROR("os: decommit %p+0x%llx: could not reserve the range again", reinterpret_cast<void*>(x),
+                         (unsigned long long)(y - x));
+        }
+        sceKernelReleaseDirectMemory(blk.phys + int64_t(x - s), y - x);
+        g_committed -= y - x;
+        it = g_blocks.erase(it);
+        if (s < x) g_blocks[s] = {blk.phys, x - s};
+        if (y < e) g_blocks[y] = {blk.phys + int64_t(y - s), e - y};  // y == b: past the range
+    }
 }
 
 // Whether direct memory maps at unit address `at`, inside a reservation of
@@ -170,8 +209,10 @@ bool commit(void* addr, size_t size, unsigned prot) {
     uint64_t hi = round_up(reinterpret_cast<uint64_t>(addr) + size, kPage);
     uint64_t ulo = lo & ~(kUnit - 1), uhi = round_up(hi, kUnit);
     std::lock_guard lock(g_mu);
+    bool fresh = true;  // every unit backed by this call (mapped read/write)
     for (uint64_t u = ulo; u < uhi;) {
         if (block_at(u) != g_blocks.end()) {
+            fresh = false;
             u += kUnit;
             continue;
         }
@@ -191,21 +232,37 @@ bool commit(void* addr, size_t size, unsigned prot) {
         if (re > hi) sceKernelMprotect(reinterpret_cast<void*>(hi), re - hi, kNone);
         u = re;
     }
+    // An mprotect costs ~28 us here (FINDINGS 7.13): skip it when back_run
+    // already mapped exactly this, read/write.
+    if (fresh && lo == ulo && hi == uhi && prot == (kRead | kWrite)) return true;
     return sceKernelMprotect(reinterpret_cast<void*>(lo), hi - lo, prot) == 0;
 }
 
 bool decommit(void* addr, size_t size) {
-    // The direct memory stays allocated until release() (it is handed out in
-    // 64 KiB units): the pages are zeroed and made inaccessible.
+    // Whole 64 KiB units give their direct memory back (the game streams by
+    // decommitting, as the Xbox returns that memory). Pages of a unit that
+    // stays partly committed are zeroed and made inaccessible, one call per
+    // run: page by page cost two mprotects (~57 us) per 16 KiB.
     uint64_t lo = reinterpret_cast<uint64_t>(addr) & ~(kPage - 1);
     uint64_t hi = round_up(reinterpret_cast<uint64_t>(addr) + size, kPage);
     std::lock_guard lock(g_mu);
-    for (uint64_t p = lo; p < hi; p += kPage) {
-        if (block_at(p & ~(kUnit - 1)) == g_blocks.end()) continue;
-        sceKernelMprotect(reinterpret_cast<void*>(p), kPage, kRead | kWrite);
-        memset(reinterpret_cast<void*>(p), 0, kPage);
-        sceKernelMprotect(reinterpret_cast<void*>(p), kPage, kNone);
+    uint64_t whole_lo = 0, whole_hi = 0;  // a run of whole units, unbacked together
+    for (uint64_t u = lo & ~(kUnit - 1); u < hi; u += kUnit) {
+        uint64_t x = std::max(lo, u), y = std::min(hi, u + kUnit);
+        if (x == u && y == u + kUnit) {
+            if (whole_hi != u) {
+                if (whole_hi > whole_lo) unback(whole_lo, whole_hi);
+                whole_lo = u;
+            }
+            whole_hi = y;
+            continue;
+        }
+        if (block_at(u) == g_blocks.end()) continue;
+        sceKernelMprotect(reinterpret_cast<void*>(x), y - x, kRead | kWrite);
+        memset(reinterpret_cast<void*>(x), 0, y - x);
+        sceKernelMprotect(reinterpret_cast<void*>(x), y - x, kNone);
     }
+    if (whole_hi > whole_lo) unback(whole_lo, whole_hi);
     return true;
 }
 
@@ -248,6 +305,28 @@ uint64_t resident_bytes() {
     sceKernelConfiguredFlexibleMemorySize(&configured);
     sceKernelAvailableFlexibleMemorySize(&available);
     return g_committed.load() + (configured > available ? configured - available : 0);
+}
+
+std::string memory_report() {
+    size_t blocks;
+    {
+        std::lock_guard lock(g_mu);
+        blocks = g_blocks.size();
+    }
+    int64_t phys = 0;
+    size_t largest = 0, configured = 0, available = 0;
+    int64_t total = sceKernelGetDirectMemorySize();
+    sceKernelAvailableDirectMemorySize(0, total, kUnit, &phys, &largest);
+    sceKernelConfiguredFlexibleMemorySize(&configured);
+    sceKernelAvailableFlexibleMemorySize(&available);
+    char line[256];
+    // The largest free block shrinks as RADV and DXVK take direct memory too.
+    snprintf(line, sizeof line,
+             "direct: ours %llu MiB in %zu blocks, largest free block %zu MiB of %lld; flexible %zu of %zu MiB used; "
+             "address-less reservations at 0x%llx",
+             (unsigned long long)(g_committed.load() >> 20), blocks, largest >> 20, (long long)(total >> 20),
+             (configured - available) >> 20, configured >> 20, (unsigned long long)g_next_anywhere.load());
+    return line;
 }
 
 }  // namespace fl::os
