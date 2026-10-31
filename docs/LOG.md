@@ -461,3 +461,9 @@ Where things stand (Monty asked for a handoff):
 - Leak check over ~4 min in game: our direct memory steady ~2.3 GiB (decommits return memory now), flexible 294 MiB, threads 89; event handles creep (+0.4/s, unexplained yet). Fixed: decommit kept memory, reservations never reused address space, watched ranges outlived their memory.
 - Stutter causes found with the per-hitch counters: slow small reads (read window), DXVK shader cache had no path (now in the data dir), autosaves blocking the update thread for seconds (write-behind commits). Remaining: present waits of 2-5 s (DXVK acquireNextImage) during gameplay and loading; frees cost ~0.1 ms each (90-140 in some frames).
 - **Next:** per-hitch DXVK counters (GPU idle, syncs) to tell a busy GPU from a stalled submission; get DXVK's threads into the dumps; check the event-handle growth on Linux.
+
+## 2026-10-31: Claude: optimisation pass results
+
+- 10 minutes in game on the PS5: steady 30 fps, two compile hitches (0.5 s, 1.2 s) right after loading, no autosave freezes, no leaks (memory flat). Flexible memory 100 MiB after the thread-stack fix.
+- What remains: first-use pipeline compiles (shrink as the caches fill), the load into the world (compiles + thousands of small reads), saves taking 2.5-8 s in the background (copying the unchanged 6 MB PlayerDatabase: could rename-keep unchanged blobs instead of copying).
+- **Next:** a 30+ min soak for slow leaks; faster saves on the PS5; the title-screen background; M2 card; M3 launcher; M6 audio.
