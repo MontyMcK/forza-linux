@@ -296,10 +296,15 @@ void dump_handler(int, siginfo_t*, void* uc_) {
     g_dump_done.store(1, std::memory_order_release);
 }
 
+std::atomic<uint64_t> g_present_tid{0};  // the thread that presents (note_present)
+
 void dump_threads() {
     const uint64_t self = os::thread_id();
     std::vector<os::ThreadInfo> threads = os::list_threads();
     if (threads.empty()) return;
+    // The presenting thread first: a freeze may end while the rest are dumped.
+    std::stable_partition(threads.begin(), threads.end(),
+                          [](const os::ThreadInfo& t) { return t.tid == g_present_tid.load(); });
     fl::log_write("threads", "==== thread dump (self = note_present at %p)", reinterpret_cast<void*>(&note_present));
     peek_globals();
     for (const os::ThreadInfo& t : threads) {
@@ -310,7 +315,7 @@ void dump_threads() {
         g_dump_done = 0;
         g_dump_buf[0] = 0;
         os::signal_thread(tid, kDumpSignal);
-        for (int i = 0; i < 200 && !g_dump_done.load(std::memory_order_acquire); i++) usleep(1000);
+        for (int i = 0; i < 50 && !g_dump_done.load(std::memory_order_acquire); i++) usleep(1000);
         fl::log_write("threads", "thread %d (%s) cpu %.2fs %s", tid, comm, cpu,
                       g_dump_done ? g_dump_buf : "did not answer\n");
     }
@@ -374,7 +379,10 @@ void start_thread_dumps() {
 
 }  // namespace
 
-void note_present() { g_last_present_ns.store(mono_ns(), std::memory_order_relaxed); }
+void note_present() {
+    g_last_present_ns.store(mono_ns(), std::memory_order_relaxed);
+    g_present_tid.store(os::thread_id(), std::memory_order_relaxed);
+}
 
 // FL_BREAK=<rva>[,<rva>...]: one-shot breakpoints in game code. Each logs its
 // first hit (channel "break": thread and caller), then the original byte is

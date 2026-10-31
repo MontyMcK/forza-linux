@@ -13,6 +13,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <vector>
 
 #include "common/log.h"
 #include "platform/os/ps5/kernel.h"
@@ -39,11 +40,31 @@ std::map<uint64_t, Block>::iterator block_at(uint64_t u) {
     return u < it->first + it->second.len ? it : g_blocks.end();
 }
 
+// Direct memory units given back by decommit, kept for the next single-unit
+// commit: the game's heap decommits and commits single 64 KiB units all the
+// time (8400 of 10000 commits on Linux), and on the PS5 each allocate and
+// release is a slow kernel call (FINDINGS 7.13). Caller holds g_mu.
+constexpr size_t kMaxParkedUnits = 1024;  // 64 MiB
+std::vector<int64_t> g_parked;
+
+// Releases direct memory [phys, phys + len), parking whole units while there's room.
+void give_back(int64_t phys, size_t len) {
+    while (len >= kUnit && g_parked.size() < kMaxParkedUnits) {
+        g_parked.push_back(phys);
+        phys += kUnit, len -= kUnit;
+    }
+    if (len) sceKernelReleaseDirectMemory(phys, len);
+}
+
 // Backs [rs, re) (unit aligned, not committed yet) with zeroed direct memory.
 bool back_run(uint64_t rs, uint64_t re) {
     size_t len = re - rs;
     int64_t phys = 0;
-    if (int rc = sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), len, kUnit, kDirectTypeCpu, &phys)) {
+    bool parked = len == kUnit && !g_parked.empty();
+    if (parked) {
+        phys = g_parked.back();
+        g_parked.pop_back();
+    } else if (int rc = sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), len, kUnit, kDirectTypeCpu, &phys)) {
         FL_ERROR("os: commit %p+0x%zx: sceKernelAllocateDirectMemory failed (0x%x)", reinterpret_cast<void*>(rs), len, rc);
         errno = ENOMEM;
         return false;
@@ -133,7 +154,7 @@ void unback(uint64_t a, uint64_t b) {
                 FL_ERROR("os: decommit %p+0x%llx: could not reserve the range again", reinterpret_cast<void*>(x),
                          (unsigned long long)(y - x));
         }
-        sceKernelReleaseDirectMemory(blk.phys + int64_t(x - s), y - x);
+        give_back(blk.phys + int64_t(x - s), y - x);
         g_committed -= y - x;
         it = g_blocks.erase(it);
         if (s < x) g_blocks[s] = {blk.phys, x - s};
@@ -272,7 +293,7 @@ void release(void* addr, size_t size) {
         std::lock_guard lock(g_mu);
         for (auto it = g_blocks.lower_bound(lo); it != g_blocks.end() && it->first < hi;) {
             sceKernelMunmap(reinterpret_cast<void*>(it->first), it->second.len);
-            sceKernelReleaseDirectMemory(it->second.phys, it->second.len);
+            give_back(it->second.phys, it->second.len);
             g_committed -= it->second.len;
             it = g_blocks.erase(it);
         }
@@ -308,10 +329,11 @@ uint64_t resident_bytes() {
 }
 
 std::string memory_report() {
-    size_t blocks;
+    size_t blocks, parked;
     {
         std::lock_guard lock(g_mu);
         blocks = g_blocks.size();
+        parked = g_parked.size() * kUnit;
     }
     int64_t phys = 0;
     size_t largest = 0, configured = 0, available = 0;
@@ -322,9 +344,9 @@ std::string memory_report() {
     char line[256];
     // The largest free block shrinks as RADV and DXVK take direct memory too.
     snprintf(line, sizeof line,
-             "direct: ours %llu MiB in %zu blocks, largest free block %zu MiB of %lld; flexible %zu of %zu MiB used; "
-             "address-less reservations at 0x%llx",
-             (unsigned long long)(g_committed.load() >> 20), blocks, largest >> 20, (long long)(total >> 20),
+             "direct: ours %llu MiB in %zu blocks (+%zu MiB parked), largest free block %zu MiB of %lld; flexible %zu of "
+             "%zu MiB used; address-less reservations at 0x%llx",
+             (unsigned long long)(g_committed.load() >> 20), blocks, parked >> 20, largest >> 20, (long long)(total >> 20),
              (configured - available) >> 20, configured >> 20, (unsigned long long)g_next_anywhere.load());
     return line;
 }

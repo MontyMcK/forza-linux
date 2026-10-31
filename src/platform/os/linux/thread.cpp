@@ -26,4 +26,6 @@ bool signal_thread(uint64_t tid, int sig) {
     return syscall(SYS_tgkill, getpid(), static_cast<pid_t>(tid), sig) == 0;
 }
 
+size_t min_thread_stack() { return 2u << 20; }
+
 }  // namespace fl::os

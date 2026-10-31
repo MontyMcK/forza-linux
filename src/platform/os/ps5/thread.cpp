@@ -69,4 +69,6 @@ std::map<uint64_t, pthread_t> known_threads() {
     return g_threads;
 }
 
+size_t min_thread_stack() { return (2u << 20) - (64u << 10); }  // just under the pool's 2 MiB
+
 }  // namespace fl::os

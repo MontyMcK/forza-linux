@@ -25,4 +25,10 @@ void current_stack(void** lo, size_t* size);
 // Sends signal `sig` to thread `tid` (a thread_id()) of this process.
 bool signal_thread(uint64_t tid, int sig);
 
+// The smallest stack a game thread gets. The PS5's thread wrap (PS5_Vulkan's
+// platform layer) gives threads that ask for less than 2 MiB a pooled 2 MiB
+// stack in direct memory; 2 MiB or more comes out of the title's 448 MiB of
+// flexible memory (89 game threads took ~180 MiB of it).
+size_t min_thread_stack();
+
 }  // namespace fl::os

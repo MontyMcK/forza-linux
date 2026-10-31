@@ -342,24 +342,30 @@ std::string dxvk_stats(void* device, size_t frames) {
 // What a slow frame did (common/perf.h counters and DXVK's pipeline count,
 // since the previous frame): where stutters come from.
 std::string frame_events(void* device) {
-    static uint64_t prev[perf::kCount] = {}, prev_pipes = 0;
-    uint64_t c[perf::kCount];
+    // DXVK's counters, in DxvkStatCounter order (as dxvk_stats).
+    enum { kPipeG = 5, kPipeL, kPipeC, kSubmits = 10, kPresents, kGpuSyncs, kGpuSyncTicks, kGpuIdle, kCsSyncs,
+           kCsSyncTicks, kCsIdle, kN = 19 };
+    static uint64_t prev[perf::kCount] = {}, prev_dx[kN] = {};
+    uint64_t c[perf::kCount], dx[kN] = {};
     for (int i = 0; i < perf::kCount; i++) c[i] = perf::g_counters[i].load(std::memory_order_relaxed);
-    uint64_t stat[8] = {};
-    dxvk_xbox_stat_counters(device, stat, 8);
-    uint64_t pipes = stat[5] + stat[6] + stat[7];  // graphics, library, compute pipelines
+    dxvk_xbox_stat_counters(device, dx, kN);
     auto d = [&](int i) { return c[i] - prev[i]; };
-    char buf[400];
+    auto x = [&](int i) { return dx[i] - prev_dx[i]; };
+    char buf[600];
     snprintf(buf, sizeof buf,
              "commits %llu (%.1f ms), frees %llu (%.1f ms), file reads %llu (%.1f MiB, %.1f ms), opens %llu "
-             "(%.1f ms), write faults %llu, uploads %llu, new threads %llu, pipelines +%llu",
+             "(%.1f ms), write faults %llu, uploads %llu, new threads %llu, pipelines +%llu; dxvk: GPU idle %.1f ms, "
+             "GPU syncs %llu (%.1f ms), CS syncs %llu (%.1f ms), CS idle %.1f ms, submits %llu, presents %llu",
              (unsigned long long)d(perf::kCommits), d(perf::kCommitNs) / 1e6, (unsigned long long)d(perf::kFrees),
              d(perf::kFreeNs) / 1e6, (unsigned long long)d(perf::kFileReads), d(perf::kFileReadBytes) / 1048576.0,
              d(perf::kFileReadNs) / 1e6, (unsigned long long)d(perf::kFileOpens), d(perf::kFileOpenNs) / 1e6,
              (unsigned long long)d(perf::kWriteFaults), (unsigned long long)d(perf::kUploads),
-             (unsigned long long)d(perf::kThreads), (unsigned long long)(pipes - prev_pipes));
+             (unsigned long long)d(perf::kThreads), (unsigned long long)(x(kPipeG) + x(kPipeL) + x(kPipeC)),
+             x(kGpuIdle) / 1000.0, (unsigned long long)x(kGpuSyncs), x(kGpuSyncTicks) / 1000.0,
+             (unsigned long long)x(kCsSyncs), x(kCsSyncTicks) / 1000.0, x(kCsIdle) / 1000.0,
+             (unsigned long long)x(kSubmits), (unsigned long long)x(kPresents));
     memcpy(prev, c, sizeof prev);
-    prev_pipes = pipes;
+    memcpy(prev_dx, dx, sizeof prev_dx);
     return buf;
 }
 

@@ -33,7 +33,6 @@ using loader::teb_off::TlsSlots;
 
 constexpr DWORD STILL_ACTIVE = 259;
 constexpr DWORD CREATE_SUSPENDED = 0x4;
-constexpr size_t kMinThreadStack = 2u << 20;
 constexpr int kSuspendSignal = SIGUSR2;
 
 using ThreadStart = DWORD(WINAPI*)(void* param);
@@ -153,7 +152,7 @@ WINAPI HANDLE kx_CreateThread(void* sa, SIZE_T stack, ThreadStart start, void* p
 
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, std::max<size_t>(stack, kMinThreadStack));
+    pthread_attr_setstacksize(&attr, std::max<size_t>(stack, os::min_thread_stack()));
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     pthread_t pt;
     auto* holder = new std::shared_ptr<Thread>(t);

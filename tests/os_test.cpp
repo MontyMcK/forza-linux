@@ -1,4 +1,5 @@
 // Tests for src/platform/os/ (the host OS layer). Each backend must pass them.
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -165,6 +166,11 @@ int main() {
          big[8 * page] == 0 && big[24 * page - 1] == 0 && big[8 * page - 1] == 0x33 && big[24 * page] == 0x33;
     if (ok) big[10 * page] = 1;
     check(ok, "decommit of whole units returns memory; committing again reads zero");
+    // One unit decommitted and committed again (the PS5 reuses parked units).
+    const size_t unit = std::max<size_t>(page, 0x10000);
+    std::memset(big, 0x44, unit);
+    ok = os::decommit(big, unit) && os::commit(big, unit, os::kRead | os::kWrite) && big[0] == 0 && big[unit - 1] == 0;
+    check(ok, "a single unit decommitted and committed again reads zero");
     os::release(big, 32 * page);
 
     auto* code = static_cast<uint8_t*>(os::map_anon(nullptr, page, os::kRead | os::kWrite));
