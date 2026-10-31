@@ -343,8 +343,8 @@ std::string dxvk_stats(void* device, size_t frames) {
 // since the previous frame): where stutters come from.
 std::string frame_events(void* device) {
     // DXVK's counters, in DxvkStatCounter order (as dxvk_stats).
-    enum { kPipeG = 5, kPipeL, kPipeC, kSubmits = 10, kPresents, kGpuSyncs, kGpuSyncTicks, kGpuIdle, kCsSyncs,
-           kCsSyncTicks, kCsIdle, kN = 19 };
+    enum { kPipeG = 5, kPipeL, kPipeC, kTasksDone, kTasksTotal, kSubmits, kPresents, kGpuSyncs, kGpuSyncTicks, kGpuIdle,
+           kCsSyncs, kCsSyncTicks, kCsIdle, kN = 19 };
     static uint64_t prev[perf::kCount] = {}, prev_dx[kN] = {};
     uint64_t c[perf::kCount], dx[kN] = {};
     for (int i = 0; i < perf::kCount; i++) c[i] = perf::g_counters[i].load(std::memory_order_relaxed);
@@ -355,7 +355,8 @@ std::string frame_events(void* device) {
     snprintf(buf, sizeof buf,
              "commits %llu (%.1f ms), frees %llu (%.1f ms), file reads %llu (%.1f MiB, %.1f ms), opens %llu "
              "(%.1f ms), write faults %llu, uploads %llu, new threads %llu, pipelines +%llu; dxvk: GPU idle %.1f ms, "
-             "GPU syncs %llu (%.1f ms), CS syncs %llu (%.1f ms), CS idle %.1f ms, submits %llu, presents %llu",
+             "GPU syncs %llu (%.1f ms), CS syncs %llu (%.1f ms), CS idle %.1f ms, submits %llu, presents %llu, "
+             "compiles done %llu (queued %llu)",
              (unsigned long long)d(perf::kCommits), d(perf::kCommitNs) / 1e6, (unsigned long long)d(perf::kFrees),
              d(perf::kFreeNs) / 1e6, (unsigned long long)d(perf::kFileReads), d(perf::kFileReadBytes) / 1048576.0,
              d(perf::kFileReadNs) / 1e6, (unsigned long long)d(perf::kFileOpens), d(perf::kFileOpenNs) / 1e6,
@@ -363,7 +364,8 @@ std::string frame_events(void* device) {
              (unsigned long long)d(perf::kThreads), (unsigned long long)(x(kPipeG) + x(kPipeL) + x(kPipeC)),
              x(kGpuIdle) / 1000.0, (unsigned long long)x(kGpuSyncs), x(kGpuSyncTicks) / 1000.0,
              (unsigned long long)x(kCsSyncs), x(kCsSyncTicks) / 1000.0, x(kCsIdle) / 1000.0,
-             (unsigned long long)x(kSubmits), (unsigned long long)x(kPresents));
+             (unsigned long long)x(kSubmits), (unsigned long long)x(kPresents), (unsigned long long)x(kTasksDone),
+             (unsigned long long)(dx[kTasksTotal] - dx[kTasksDone]));
     memcpy(prev, c, sizeof prev);
     memcpy(prev_dx, dx, sizeof prev_dx);
     return buf;

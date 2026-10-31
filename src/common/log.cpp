@@ -23,6 +23,7 @@ std::mutex g_mutex;        // stderr and g_pending
 std::mutex g_write_mutex;  // writes to the log file, kept in order
 int g_fd = -1;
 std::string g_pending;     // lines not in the file yet
+bool g_stderr = true;      // our lines also go to stderr (not when it's FL_STDERR_FILE)
 timespec g_start;
 
 double elapsed() {
@@ -56,7 +57,7 @@ void vwrite(const char* channel, const char* fmt, va_list ap) {
     snprintf(line, sizeof line, "[%9.4f %6ld %-8s] %s\n", elapsed(), static_cast<long>(os::thread_id()), channel, msg);
     {
         std::lock_guard lock(g_mutex);
-        fputs(line, stderr);
+        if (g_stderr) fputs(line, stderr);
         if (g_fd >= 0) g_pending += line;
     }
     if (!strcmp(channel, "ERROR") || !strcmp(channel, "FATAL")) write_pending();
@@ -73,6 +74,15 @@ void log_init() {
         g_all = g_channels.find(",all,") != std::string::npos;
     }
     if (const char* f = getenv("FL_LOG_FILE")) g_fd = open(f, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    // FL_STDERR_FILE=<path>: what libraries print to stderr (RADV's and the
+    // PS5 WSI's warnings) goes to that file; a PS5 title's stderr goes nowhere.
+    // Our own lines then stay out of it: stderr is unbuffered, and a write to
+    // the PS5's /data per log line stalls the game (FINDINGS 7.12).
+    if (const char* f = getenv("FL_STDERR_FILE")) {
+        int fd = open(f, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (fd >= 0 && dup2(fd, 2) >= 0) g_stderr = false;
+        if (fd >= 0) close(fd);
+    }
     if (g_fd >= 0)
         std::thread([] {
             for (;;) {
